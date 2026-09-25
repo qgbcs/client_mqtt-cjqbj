@@ -1,0 +1,1 @@
+# ClientMqtt release shrinker rules.

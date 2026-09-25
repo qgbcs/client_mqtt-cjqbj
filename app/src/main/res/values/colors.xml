@@ -1,0 +1,7 @@
+<resources>
+    <color name="client_primary">#1B5E62</color>
+    <color name="client_primary_dark">#103C40</color>
+    <color name="client_on_primary">#FFFFFF</color>
+    <color name="client_secondary">#C46A3A</color>
+    <color name="client_on_secondary">#FFFFFF</color>
+</resources>
