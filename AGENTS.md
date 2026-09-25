@@ -15,6 +15,7 @@
 
 ## Development rules
 - Keep UI, Python bridge, RPC code generation, and transport adapters separate.
+- New runtime features must follow `FEATURE_DEVELOPMENT.md`; do not add feature-specific Compose code to the main activity.
 - Use explicit JSON for RPC results; do not depend on pretty-printed Python repr for new protocols.
 - Bound recursive scans with a configured page size and return `has_more` and `next_offset`.
 - Reject path traversal, symlink escape, and unbounded recursion.

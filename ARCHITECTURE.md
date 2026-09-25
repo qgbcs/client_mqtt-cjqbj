@@ -8,6 +8,8 @@
 
 At startup, the app creates private writable `files/py_updates/` and puts it first on `sys.path`. A downloaded `feature_*.py` there overrides the bundled feature and is reloaded on the next call. The APK itself remains immutable.
 
+The Compose pager polls `client_service.feature_catalog()` every three seconds. Each descriptor becomes one side-swipe page titled from the script manifest. The UI communicates with scripts only through `client_service.call_feature(name, action, *args)`; scripts return short JSON/status values and use Aliyun for large data.
+
 ## MQTT
 The copied `multi_mqtt` package handles the existing racing request/response protocol. The client sends short RPC code and receives short JSON metadata only.
 

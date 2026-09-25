@@ -63,6 +63,23 @@ def list_features():
     return sorted(names)
 
 
+def describe_features():
+    result = []
+    for name in list_features():
+        try:
+            module = load_feature(name)
+            manifest = getattr(module, "FEATURE", {})
+            result.append({
+                "name": name,
+                "title": str(manifest.get("title") or name),
+                "version": manifest.get("version", 1),
+                "actions": list(manifest.get("actions") or ["run"]),
+            })
+        except Exception as exc:
+            result.append({"name": name, "title": name, "version": 0, "actions": [], "error": repr(exc)})
+    return result
+
+
 def call_feature(feature, action="run", *args):
     module = load_feature(feature)
     function = getattr(module, str(action), None)

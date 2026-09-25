@@ -1,6 +1,7 @@
 """Client-side bridge for MQTT RPC and remote file operations."""
 
 import json
+import base64
 import importlib
 import os
 import sys
@@ -27,7 +28,7 @@ def call_feature(feature, action="run", *args):
 
 def feature_catalog():
     import bootstrap
-    return json.dumps(bootstrap.list_features(), ensure_ascii=False)
+    return json.dumps(bootstrap.describe_features(), ensure_ascii=False)
 
 
 def install_feature(url, filename, sha256=""):
@@ -42,6 +43,15 @@ def initialize(files_dir):
     if not os.path.isfile(path):
         save_config({"devices": [_DEFAULT_DEVICE.copy()], "scan_limit": 100, "remote_root": "/data/data"})
     return {"ok": True, "files_dir": _STATE["files_dir"]}
+
+
+def update_settings(values):
+    config = load_config()
+    if isinstance(values, str):
+        values = json.loads(values)
+    config.update(dict(values or {}))
+    save_config(config)
+    return json.dumps(config, ensure_ascii=False)
 
 
 def load_config():
@@ -137,6 +147,24 @@ def download_transfer(url, config=None, save_to=None):
     aliyun_git = importlib.import_module("aliyun_git")
     data = aliyun_git.download(url, save_to=save_to, max_show_bytes_size=0)
     return {"ok": True, "path": data if save_to else None, "size": os.path.getsize(data) if save_to else len(data)}
+
+
+def download_transfer_base64(url, config=None):
+    """Download an image/file into memory for the Android bridge, never MQTT."""
+    _set_aliyun_config(config or load_config().get("aliyun", {}))
+    aliyun_git = importlib.import_module("aliyun_git")
+    data = aliyun_git.download(url, max_show_bytes_size=0)
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def download_remote_to_file(url, name, config=None):
+    root = _STATE.get("files_dir") or os.getcwd()
+    target_dir = os.path.join(root, "downloads")
+    os.makedirs(target_dir, exist_ok=True)
+    safe_name = os.path.basename(str(name)) or "download.bin"
+    target = os.path.join(target_dir, safe_name)
+    result = download_transfer(url, config=config, save_to=target)
+    return json.dumps(result, ensure_ascii=False)
 
 
 def build_wifi_code():

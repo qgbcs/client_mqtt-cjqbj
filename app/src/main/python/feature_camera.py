@@ -2,7 +2,7 @@
 
 import client_service
 
-FEATURE = {"name": "camera", "version": 1, "actions": ["capture"]}
+FEATURE = {"name": "camera", "title": "Camera", "version": 1, "actions": ["capture"]}
 
 
 def run():

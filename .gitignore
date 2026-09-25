@@ -41,7 +41,6 @@ app/src/main/assets/association_model
 
 /.kilo
 /.kotlin
-/out
 
 # Plugin module builds
 plugin-api/build

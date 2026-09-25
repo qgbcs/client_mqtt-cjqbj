@@ -4,15 +4,17 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+APK_BASENAME="${APK_BASENAME:-client_mqtt}"
+
 SECEXP="${SECEXP:-1}"
-APPLICATION_ID="${APPLICATION_ID:-com.qgb.clientmqtt}"
+APPLICATION_ID="${APPLICATION_ID:-com.qgb.client_mqtt}"
 VERSION_CODE="${VERSION_CODE:-1}"
 VERSION_NAME="${VERSION_NAME:-$VERSION_CODE}"
 APP_NAME="${APP_NAME:-Client MQTT}"
-APK_BASENAME="${APK_BASENAME:-ClientMqtt}"
+
 
 BUILD_ABIS="${BUILD_ABIS:-arm64-v8a}"
-OUT_DIR="${OUT_DIR:-$PROJECT_DIR/out/debug-secexp}"
+OUT_DIR="${OUT_DIR:-$PROJECT_DIR/out}"
 
 # 任何一次变更都必须显式传入；禁止把 SECEXP 或构建环境写进版本名/包名。
 export APP_NAME APK_BASENAME APPLICATION_ID VERSION_CODE VERSION_NAME BUILD_ABIS SECEXP

@@ -21,3 +21,5 @@ Use structured error fields and preserve the target traceback in the log channel
 
 ## Hot-updatable features
 Feature modules use the names `feature_files`, `feature_camera`, and `feature_wifi`. The stable dispatcher calls `bootstrap.call_feature(feature, action, *args)`. Runtime updates must be `feature_*.py` files written atomically into the app-private `files/py_updates/` directory. Optional SHA-256 verification is supported by `bootstrap.install_feature`; unsigned or path-traversal filenames are rejected.
+
+The UI catalog refresh interval is three seconds. A script is not required to ship an Android class: its `FEATURE.title` is the pager title and its `FEATURE.actions` become generic action buttons. See `FEATURE_DEVELOPMENT.md` for the complete contract.

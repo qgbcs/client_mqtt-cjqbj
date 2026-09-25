@@ -1,8 +1,9 @@
 """Remote filesystem feature. Replaceable at runtime."""
 
 import client_service
+import json
 
-FEATURE = {"name": "files", "version": 1, "actions": ["scan", "upload"]}
+FEATURE = {"name": "files", "title": "Files", "version": 1, "actions": ["scan", "upload"]}
 
 
 def run():
@@ -14,4 +15,4 @@ def scan(root, offset=0, limit=100):
 
 
 def upload(remote_path):
-    return client_service.upload_remote(remote_path)
+    return json.dumps(client_service.upload_remote(remote_path), ensure_ascii=False)

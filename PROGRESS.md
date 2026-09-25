@@ -14,6 +14,10 @@
 - Completed: split files, camera, and Wi-Fi into independent `feature_*.py` modules.
 - Completed: added stable `bootstrap.py` with writable `files/py_updates` override and SHA-256 checked installation.
 - Completed: Android pages dispatch through the feature loader instead of importing feature implementations directly.
+- Completed: added all-permission settings page with runtime permission batch request and all-files access shortcut.
+- Completed: added internal/external script-root selection; external default is `/sdcard/apm/client_mqtt/` after authorization.
+- Completed: persisted Aliyun settings beside the selected script root and added file download/Bitmap preview flow.
+- Completed: added 30-second MQTT online polling status.
 - Completed: split files, camera, and Wi-Fi into independent Python feature modules.
 - Completed: added immutable bootstrap plus writable `files/py_updates` hot-reload path.
 - Completed: full root-level `./debug_build_secexp.sh` succeeded with Chaquopy Python 3.12.
@@ -21,8 +25,7 @@
 - Completed: focused Python tests pass (`5/5`), including runtime replacement and reload.
 - In progress: validate runtime feature replacement on an Android device.
 - In progress: finish Python callback/log plumbing, file transfer, image display, and device polling.
-- Pending: persist all settings through the UI, add focused tests, and run device validation.
-- Pending: decode downloaded image bytes in the UI, persist all settings, add periodic online polling, and run device validation.
+- Pending: install the APK on a real device and validate both cameras, all permission flows, external storage, Aliyun transfer, and runtime feature installation.
 
 ## Last validation
 - `bash -n debug_build_secexp.sh`: passed.

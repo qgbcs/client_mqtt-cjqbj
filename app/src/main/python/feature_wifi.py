@@ -2,7 +2,7 @@
 
 import client_service
 
-FEATURE = {"name": "wifi", "version": 1, "actions": ["info"]}
+FEATURE = {"name": "wifi", "title": "Wi-Fi", "version": 1, "actions": ["info"]}
 
 
 def run():
