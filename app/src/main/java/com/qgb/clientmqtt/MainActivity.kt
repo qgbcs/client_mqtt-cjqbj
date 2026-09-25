@@ -144,6 +144,12 @@ private fun ClientMqttScreen() {
         }
     }
 
+    LaunchedEffect(features.size) {
+        if (features.isNotEmpty() && pagerState.currentPage >= features.size) {
+            pagerState.animateScrollToPage(features.lastIndex)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -172,31 +178,30 @@ private fun ClientMqttScreen() {
             )
         } else {
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                ScrollableTabRow(selectedTabIndex = pagerState.currentPage) {
-                            features.forEachIndexed { index, feature ->
-                        Tab(
-                            selected = pagerState.currentPage == index,
-                            onClick = { pagerScope.launch { pagerState.animateScrollToPage(index) } },
-                                    text = { Text(feature.title) },
-                            icon = {
-                                Icon(
-                                    imageVector = when (index) {
-                                                else -> when (feature.name) {
-                                                    "files" -> Icons.Outlined.Folder
-                                                    "camera" -> Icons.Outlined.CameraAlt
-                                                    "wifi" -> Icons.Outlined.NetworkWifi
-                                                    else -> Icons.Outlined.Settings
-                                                }
-                                    },
-                                            contentDescription = feature.title
-                                )
-                            }
-                        )
-                    }
-                }
                 if (features.isEmpty()) {
                     Text("No feature scripts found", modifier = Modifier.padding(16.dp))
                 } else {
+                    val selectedPage = pagerState.currentPage.coerceIn(0, features.lastIndex)
+                    ScrollableTabRow(selectedTabIndex = selectedPage) {
+                        features.forEachIndexed { index, feature ->
+                            Tab(
+                                selected = selectedPage == index,
+                                onClick = { pagerScope.launch { pagerState.animateScrollToPage(index) } },
+                                text = { Text(feature.title) },
+                                icon = {
+                                    Icon(
+                                        imageVector = when (feature.name) {
+                                            "files" -> Icons.Outlined.Folder
+                                            "camera" -> Icons.Outlined.CameraAlt
+                                            "wifi" -> Icons.Outlined.NetworkWifi
+                                            else -> Icons.Outlined.Settings
+                                        },
+                                        contentDescription = feature.title
+                                    )
+                                }
+                            )
+                        }
+                    }
                     HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                         when (features[page].name) {
                             "files" -> FilesPage()
