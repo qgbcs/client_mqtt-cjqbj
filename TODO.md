@@ -21,4 +21,5 @@
 - Catchable Python feature failures, including `SystemExit`, reported as structured UI errors instead of escaping into the Activity.
 - In-app RPC diagnostics with broker state and credential/source redaction.
 - Private-key standardization button backed by the upstream PEM normalizer.
+- Copyable RPC diagnostics and Wi-Fi result, including sanitized key configuration state.
 - Configurable per-target online health probing deferred by successful requests.

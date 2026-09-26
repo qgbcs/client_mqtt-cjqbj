@@ -385,6 +385,21 @@ def _record_rpc_health(selected, succeeded):
             health["last_success_at_ms"] = now
 
 
+def _private_key_kind(value):
+    if not value:
+        return "none"
+    if isinstance(value, bytes):
+        return "pem-bytes" if value.startswith(b"-----BEGIN") else "binary"
+    text = str(value).strip()
+    if text.startswith("-----BEGIN"):
+        return "pem-text"
+    if os.path.isfile(text):
+        return "key-file"
+    if any(char in text for char in "**+-/%() "):
+        return "integer-expression"
+    return "raw-text"
+
+
 def update_device_settings(existing_device, values):
     if isinstance(values, str):
         values = json.loads(values)
@@ -485,8 +500,27 @@ def rpc(code, device=None):
         _record_rpc_start(selected)
         timeout = float(selected.get("timeout", 10))
         topic = selected["request_topic"]
-        _append_rpc_log(f"INFO id={request_id} topic={topic} phase=loading-client timeout={timeout:g}s")
+        private_key = selected.get("private_key") or None
+        key_kind = _private_key_kind(private_key)
+        reply_topic = "sys/device/response"
+        _append_rpc_log(
+            f"INFO id={request_id} topic={topic} reply_topic={reply_topic} phase=loading-client "
+            f"timeout={timeout:g}s private_key_configured={'yes' if private_key else 'no'} key_format={key_kind}"
+        )
         client_mqtt = _mqtt_client_module()
+        if private_key:
+            try:
+                normalized_key = client_mqtt.get_standard_pem_bytes(private_key)
+            except BaseException as error:
+                _append_rpc_log(
+                    f"ERROR id={request_id} topic={topic} phase=key-normalization-failed "
+                    f"key_configured=yes format={key_kind} exception_type={type(error).__name__}"
+                )
+                raise
+            _append_rpc_log(
+                f"INFO id={request_id} topic={topic} phase=key-normalized "
+                f"format={key_kind} normalized_bytes={len(normalized_key) if normalized_key else 0}"
+            )
         aliyun = json.dumps(load_config().get("aliyun") or {}, ensure_ascii=False)
         code = (
             "import sys\n"
@@ -498,7 +532,7 @@ def rpc(code, device=None):
             code,
             request_topic=topic,
             timeout=timeout,
-            client_private_key_bytes=selected.get("private_key") or None,
+            client_private_key_bytes=private_key,
             allow_no_server_pubkey_response=bool(selected.get("allow_no_server_pubkey_response", False)),
         )
     except BaseException as error:

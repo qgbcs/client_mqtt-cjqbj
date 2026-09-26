@@ -15,17 +15,23 @@
 - Completed: added settings back handling, migrated Aliyun to shared configuration, passed key expressions to upstream normalization, and surfaced Wi-Fi failures in the page.
 - Completed: feature dispatcher converts Python exceptions and `SystemExit` to structured UI errors; broken runtime feature regression test passes.
 - Completed: topic settings can normalize private-key expressions to PEM using upstream `get_standard_pem_bytes`.
-- Completed: App RPC diagnostics show request topic, phase, elapsed time, response brokers, and timeout connection states without logging secrets or RPC source.
+- Completed: Add target defaults to `sys/device/request`; existing target edits keep their stored topic.
+- Completed: the old private-key test fixture was replaced with `233` in upstream `multi_mqtt` and synchronized client/xime copies; no tracked file contains the old literal.
+- Completed: Add target initializes request topic to `sys/device/request` while edits to existing targets retain their stored topic.
+- Completed: removed the previously embedded key-expression example from the upstream and synchronized MQTT test fixtures; placeholders now use `233`.
+- Completed: App RPC diagnostics show/copy request/reply topic, key presence/type/normalized length, phase, elapsed time, response brokers, and timeout connection states without logging secrets or RPC source; Wi-Fi output is selectable/copyable.
 - Completed: RPC metadata is attached to feature results; shared online probe enable/interval settings track health per topic and successful RPCs defer the next probe.
-- Completed: Wi-Fi RPC through `feature_wifi.info()` with the user's `233` key, `sys/device/k12`, and 5-second timeout returned `192.168.1.106`; an earlier `2**64` probe timed out because it used different parameters.
-- Completed: Python tests pass (`29/29`); `./debug_build_secexp.sh` generated and verified `out/com.qgb.client-1-arm64-v8a.apk` with RPC metadata and configurable deferred probing.
+- Completed: Wi-Fi RPC through `feature_wifi.info()` with the user's `233` key, `sys/device/k12`, and 5-second timeout returned `192.168.1.106`; a prior probe used a different test key and timed out.
+- Completed: Python tests pass (`30/30`); `./debug_build_secexp.sh` generated and verified `out/com.qgb.client-1-arm64-v8a.apk` with key-status, copyable diagnostics, and configurable deferred probing.
 - Pending: install and exercise the app UI on Android; validate two responders, pagination, file/Aliyun transfer, both cameras, permissions, external storage, and runtime feature installation.
 
 ## Last validation
 - `bash -n debug_build_secexp.sh`: passed.
-- `python3 -m unittest discover -s tests`: passed (`29/29`), including probe settings, response metadata, health updates, and redacted timeout logs.
+- `python3 -m unittest discover -s tests`: passed (`30/30`), including probe settings, response metadata, health updates, key status, and redacted timeout logs.
+- Upstream and xime MQTT fixture suites: eight tests pass; one pre-existing test fails because it passes unsupported `server_public_key_bytes` to `MQTTClientNode`.
 - Wi-Fi feature RPC with the exact `233` sample parameters: passed; returned `192.168.1.106` and MAC metadata.
 - `./debug_build_secexp.sh`: passed; APK metadata reports version code `1` and signature verification passed.
+- Client tests passed after upstream sync (`30/30`); exact private-key example search is clean in client, multi_mqtt, and xime tracked files.
 - Kotlin `:app:compileDebugKotlin`: passed; only existing deprecation warnings remain.
 - Kotlin/Python workspace diagnostics and `git diff --check`: passed.
 - Full Android UI/device integration suite, including live external-file refresh and GitHub download on a device: not run.

@@ -1,6 +1,8 @@
 package com.qgb.clientmqtt
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager as AndroidClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -34,6 +36,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CameraAlt
@@ -261,7 +264,10 @@ private fun ClientMqttScreen() {
             val lastProbeOk = health.optBoolean("last_probe_ok", false)
             onlineStatus = when {
                 inFlight > 0 -> "checking"
+                lastProbeAt == 0L && !onlineProbeEnabled -> "probe disabled"
                 lastProbeAt == 0L -> "checking"
+                lastProbeOk && !onlineProbeEnabled -> "online · probe disabled"
+                !lastProbeOk && !onlineProbeEnabled -> "offline · probe disabled"
                 lastProbeOk -> "online"
                 else -> "offline"
             }
@@ -615,23 +621,34 @@ private fun CameraPage() {
 @Composable
 private fun WifiPage() {
     var status by remember { mutableStateOf("Waiting for target RPC") }
+    var copyStatus by remember { mutableStateOf("") }
     val service = remember { Python.getInstance().getModule("client_service") }
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as AndroidClipboardManager
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(onClick = {
-            status = "Querying..."
-            scope.launch {
-                try {
-                    val raw = withContext(Dispatchers.IO) {
-                        service.callAttr("call_feature", "wifi", "info").toString()
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                status = "Querying..."
+                scope.launch {
+                    try {
+                        val raw = withContext(Dispatchers.IO) {
+                            service.callAttr("call_feature", "wifi", "info").toString()
+                        }
+                        status = runCatching { JSONObject(raw).toString(2) }.getOrDefault(raw)
+                        copyStatus = ""
+                    } catch (error: Exception) {
+                        status = "Wi-Fi query failed: ${error.message}"
                     }
-                    status = runCatching { JSONObject(raw).toString(2) }.getOrDefault(raw)
-                } catch (error: Exception) {
-                    status = "Wi-Fi query failed: ${error.message}"
                 }
-            }
-        }) { Text("Refresh Wi-Fi") }
-        Text(status, style = MaterialTheme.typography.bodyMedium)
+            }) { Text("Refresh Wi-Fi") }
+            TextButton(onClick = {
+                clipboard.setPrimaryClip(ClipData.newPlainText("Wi-Fi result", status))
+                copyStatus = "Copied"
+            }) { Text("Copy") }
+        }
+        SelectionContainer { Text(status, style = MaterialTheme.typography.bodyMedium) }
+        if (copyStatus.isNotBlank()) Text(copyStatus, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -647,6 +664,8 @@ private fun DiagnosticsPage(
     val service = remember { Python.getInstance().getModule("client_service") }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as AndroidClipboardManager
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -674,6 +693,11 @@ private fun DiagnosticsPage(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = {
+                    val report = "topic=$selectedTopic status=$onlineStatus\n" + logs.joinToString("\n")
+                    clipboard.setPrimaryClip(ClipData.newPlainText("RPC diagnostics", report))
+                    status = "RPC diagnostics copied"
+                }) { Text("Copy") }
+                TextButton(onClick = {
                     scope.launch {
                         runCatching {
                             withContext(Dispatchers.IO) { service.callAttr("clear_rpc_logs") }
@@ -696,7 +720,9 @@ private fun DiagnosticsPage(
                 item { Text("No RPC activity yet", style = MaterialTheme.typography.bodyMedium) }
             } else {
                 items(logs) { entry ->
-                    Text(entry, style = MaterialTheme.typography.bodySmall)
+                    SelectionContainer {
+                        Text(entry, style = MaterialTheme.typography.bodySmall)
+                    }
                     HorizontalDivider()
                 }
             }
@@ -737,7 +763,9 @@ private fun TargetSettingsPage(
     onTargetCreated: (String) -> Unit
 ) {
     var deviceId by remember(existingDeviceId) { mutableStateOf(existingDeviceId.orEmpty()) }
-    var topic by remember(existingDeviceId) { mutableStateOf("") }
+    var topic by remember(existingDeviceId) {
+        mutableStateOf(if (existingDeviceId == null) "sys/device/request" else "")
+    }
     var remoteRoot by remember(existingDeviceId) { mutableStateOf("/data/data") }
     var privateKey by remember(existingDeviceId) { mutableStateOf("") }
     var timeout by remember(existingDeviceId) { mutableStateOf("10") }
@@ -855,6 +883,11 @@ private fun TargetSettingsPage(
                 Text(if (normalizingPrivateKey) "Working..." else "Standardize")
             }
         }
+        Text(
+            if (privateKey.isBlank()) "Private key: not configured"
+            else "Private key: configured; value is never copied to RPC logs",
+            style = MaterialTheme.typography.bodySmall
+        )
         if (privateKeyStatus.isNotBlank()) Text(privateKeyStatus, style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(
             timeout,

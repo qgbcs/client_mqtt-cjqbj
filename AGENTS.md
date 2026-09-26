@@ -22,7 +22,7 @@
 - 每个 feature 自己负责领域代码生成和 RPC 动作；`client_service` 只提供通用 RPC、JSON、配置和传输桥接，不新增 `build_wifi_code`、`scan_remote` 这类 feature 专属 helper。
 - Feature 返回结构化 JSON；普通信息由 Compose 展示，照片等媒体通过 feature 返回的短 URL/元数据交给 Compose 下载和预览，不能把媒体字节经 MQTT 返回。
 - `client_service.call_feature` 必须捕获 feature 的 Python 异常并返回结构化错误，不能让第三方脚本异常越过 Chaquopy 边界关闭 Activity；原生/JVM 崩溃不属于此保护范围。
-- RPC 必须写入 App 内可查看的有界诊断日志，包含关联 ID、topic、阶段、耗时、响应 broker 和超时连接状态；禁止记录私钥、Aliyun 凭据或 RPC 源码。
+- RPC 必须写入 App 内可查看且可复制的有界诊断日志，包含关联 ID、topic、reply topic、key 是否配置及类型/标准化长度、阶段、耗时、响应 broker 和超时连接状态；不得记录 key 内容、Aliyun 凭据或 RPC 源码。
 - 通用设置必须提供在线探测开关和间隔；任一目标 topic 的成功 RPC 都更新其健康时间，并推迟该目标的下一次探测，避免重复 ping。
 - RPC 结果使用明确 JSON，不要为新协议依赖 Python 的 repr 输出。
 - 递归扫描必须限制分页大小并返回 `has_more`、`next_offset`；拒绝路径穿越、符号链接逃逸和无界递归。

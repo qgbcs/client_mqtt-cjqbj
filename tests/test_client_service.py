@@ -109,14 +109,15 @@ class ClientServiceTests(unittest.TestCase):
                 client_service.initialize(files_dir)
                 client_service.update_device_settings("sys/device/request", {
                     "request_topic": "sys/device/key-test",
-                    "private_key": "2**64",
+                    "private_key": "233",
                 })
                 mqtt_module = mock.Mock()
+                mqtt_module.get_standard_pem_bytes.return_value = b"-----BEGIN EC PRIVATE KEY-----"
                 mqtt_module.rpc.return_value = {"ok": True, "r": "{}"}
                 with mock.patch.object(client_service, "_mqtt_client_module", return_value=mqtt_module):
                     client_service.rpc("r = {}")
 
-                self.assertEqual(mqtt_module.rpc.call_args.kwargs["client_private_key_bytes"], "2**64")
+                self.assertEqual(mqtt_module.rpc.call_args.kwargs["client_private_key_bytes"], "233")
             finally:
                 client_service._STATE.clear()
                 client_service._STATE.update(previous_state)
@@ -129,7 +130,7 @@ class ClientServiceTests(unittest.TestCase):
         self.assertTrue(result.startswith("-----BEGIN EC PRIVATE KEY-----"))
         mqtt_module.get_standard_pem_bytes.assert_called_once_with("233")
 
-    def test_private_key_standardization_converts_2_pow_128_to_pem(self):
+    def test_private_key_standardization_converts_integer_to_pem(self):
         pem = client_service.standardize_private_key("233")
         self.assertTrue(pem.startswith("-----BEGIN EC PRIVATE KEY-----"))
         self.assertTrue(pem.rstrip().endswith("-----END EC PRIVATE KEY-----"))
@@ -152,6 +153,7 @@ class ClientServiceTests(unittest.TestCase):
                 broker_client = mock.Mock()
                 broker_client.is_connected.return_value = False
                 mqtt_module = mock.Mock()
+                mqtt_module.get_standard_pem_bytes.return_value = b"-----BEGIN EC PRIVATE KEY-----\nredacted\n"
                 mqtt_module.rpc.return_value = None
                 mqtt_module._default_client = mock.Mock(
                     mqtt_net=mock.Mock(clients={"broker.example": broker_client})
@@ -165,6 +167,9 @@ class ClientServiceTests(unittest.TestCase):
                 logs = "\n".join(json.loads(client_service.rpc_logs()))
                 self.assertIn("topic=sys/device/k12", logs)
                 self.assertIn("brokers=[broker.example:disconnected]", logs)
+                self.assertIn("private_key_configured=yes", logs)
+                self.assertIn("key_format=raw-text", logs)
+                self.assertIn("normalized_bytes=40", logs)
                 self.assertNotIn("DO_NOT_LOG_THIS_KEY", logs)
             finally:
                 client_service._STATE.clear()
@@ -226,6 +231,30 @@ class ClientServiceTests(unittest.TestCase):
                 logs = "\n".join(json.loads(client_service.rpc_logs()))
                 self.assertIn("exception_type=ValueError", logs)
                 self.assertNotIn("SECRET_VALUE", logs)
+            finally:
+                client_service._STATE.clear()
+                client_service._STATE.update(previous_state)
+
+    def test_rpc_logs_key_normalization_failure_without_key_value(self):
+        previous_state = client_service._STATE.copy()
+        with tempfile.TemporaryDirectory() as files_dir:
+            try:
+                client_service.initialize(files_dir)
+                client_service.update_device_settings("sys/device/request", {
+                    "request_topic": "sys/device/k12",
+                    "private_key": "SECRET_BAD_KEY",
+                })
+                mqtt_module = mock.Mock()
+                mqtt_module.get_standard_pem_bytes.side_effect = ValueError("invalid private key SECRET_BAD_KEY")
+                with mock.patch.object(client_service, "_mqtt_client_module", return_value=mqtt_module):
+                    result = client_service.rpc("wifi probe")
+
+                self.assertEqual(result["topic"], "sys/device/k12")
+                logs = "\n".join(json.loads(client_service.rpc_logs()))
+                self.assertIn("phase=key-normalization-failed", logs)
+                self.assertIn("key_configured=yes", logs)
+                self.assertIn("exception_type=ValueError", logs)
+                self.assertNotIn("SECRET_BAD_KEY", logs)
             finally:
                 client_service._STATE.clear()
                 client_service._STATE.update(previous_state)
