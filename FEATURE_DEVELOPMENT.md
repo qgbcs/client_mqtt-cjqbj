@@ -51,6 +51,10 @@ A feature must not import Compose or Android Activity classes. It owns its domai
 - `client_service.aliyun_settings()` and `update_aliyun_settings(values)` read and write the single shared Aliyun configuration.
 - `client_service.install_builtin_features(script_root, retries, timeout)` installs the three built-in feature scripts into the selected root's `py_updates/` directory.
 - `client_service.operation_logs()` returns the rolling downloader log for UI display.
+- `client_service.rpc_logs()` and `clear_rpc_logs()` expose and clear the redacted RPC diagnostic ring buffer.
+- `client_service.standardize_private_key(value)` normalizes key expressions and PEM/OpenSSH inputs through upstream `get_standard_pem_bytes`.
+- `client_service.general_settings()` and `update_general_settings(values)` manage the app-wide online probe toggle and interval.
+- `client_service.target_health(device_ref)` returns per-target last RPC/probe state and in-flight count.
 - `feature_files.scan(...)` generates and sends bounded target scanning code.
 - `feature_files.upload(path)` generates and sends target-side Aliyun upload code.
 - `feature_wifi.info()` builds the Wi-Fi query code in `feature_wifi.py` and sends it through the generic RPC bridge.
@@ -75,3 +79,5 @@ Only `feature_*.py` filenames are accepted. The module is discovered on the next
 ## UI communication
 
 The UI never imports feature modules directly. It polls `client_service.feature_catalog()`, creates a pager entry for each descriptor, and invokes actions through `client_service.call_feature`. This keeps the Android APK stable while allowing feature scripts to evolve independently.
+
+Successful MQTT envelopes are preserved under the feature result's `_rpc` key with request ID, server time, broker names, latency, and elapsed time. Use this metadata and the redacted RPC diagnostics page to inspect transport behavior. The periodic online probe is shared-configurable and is deferred after any successful RPC for that target.

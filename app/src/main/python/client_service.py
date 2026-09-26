@@ -19,6 +19,8 @@ _STATE = {
     "selected_device_id": None,
     "last_config": None,
     "operation_logs": [],
+    "rpc_logs": [],
+    "rpc_health": {},
 }
 _DEFAULT_DEVICE = {
     "name": "Target",
@@ -116,6 +118,38 @@ def operation_logs():
         return json.dumps(list(_STATE.get("operation_logs", [])), ensure_ascii=False)
 
 
+def _append_rpc_log(message):
+    entry = f"{time.strftime('%H:%M:%S')} {str(message).replace(chr(10), ' ')[:500]}"
+    with _STATE["lock"]:
+        logs = _STATE.setdefault("rpc_logs", [])
+        logs.append(entry)
+        del logs[:-500]
+    return entry
+
+
+def rpc_logs():
+    with _STATE["lock"]:
+        return json.dumps(list(_STATE.get("rpc_logs", [])), ensure_ascii=False)
+
+
+def clear_rpc_logs():
+    with _STATE["lock"]:
+        _STATE.setdefault("rpc_logs", []).clear()
+    return json.dumps({"ok": True})
+
+
+def standardize_private_key(value):
+    """Normalize a private key using the upstream multi_mqtt implementation."""
+    mqtt_client = _mqtt_client_module()
+    normalized = mqtt_client.get_standard_pem_bytes(value)
+    if not normalized:
+        raise ValueError("private key is empty")
+    try:
+        return normalized.decode("utf-8")
+    except AttributeError:
+        return bytes(normalized).decode("utf-8")
+
+
 def install_builtin_features(script_root, retries=4, timeout=15):
     """Install missing bundled feature scripts into a chosen script root."""
     import bootstrap
@@ -195,6 +229,8 @@ def initialize(files_dir):
             device.pop("aliyun_json_draft", None)
         config["devices"] = devices
         config["aliyun"] = aliyun
+        config.setdefault("online_probe_enabled", True)
+        config.setdefault("online_probe_interval", 30)
         if aliyun_draft is not None:
             config["aliyun_json_draft"] = aliyun_draft
         config.pop("remote_root", None)
@@ -212,6 +248,31 @@ def update_settings(values):
         config.update(dict(values or {}))
         save_config(config)
         return json.dumps(config, ensure_ascii=False)
+
+
+def general_settings():
+    config = load_config()
+    try:
+        interval = int(config.get("online_probe_interval", 30))
+    except (TypeError, ValueError):
+        interval = 30
+    return json.dumps({
+        "online_probe_enabled": bool(config.get("online_probe_enabled", True)),
+        "online_probe_interval": max(5, min(interval, 3600)),
+    }, ensure_ascii=False)
+
+
+def update_general_settings(values):
+    if isinstance(values, str):
+        values = json.loads(values)
+    if not isinstance(values, dict):
+        raise ValueError("general settings must be an object")
+    interval = int(values.get("online_probe_interval", 30))
+    config = load_config()
+    config["online_probe_enabled"] = bool(values.get("online_probe_enabled", True))
+    config["online_probe_interval"] = max(5, min(interval, 3600))
+    save_config(config)
+    return general_settings()
 
 
 def aliyun_settings():
@@ -269,6 +330,59 @@ def select_device(device_ref):
     _STATE["selected_device_id"] = selected["id"]
     _STATE["selected_topic"] = selected["request_topic"]
     return json.dumps({"ok": True, "device": selected}, ensure_ascii=False)
+
+
+def target_health(device_ref=None):
+    selected = _device_config(device_ref)
+    key = selected.get("id") or selected["request_topic"]
+    with _STATE["lock"]:
+        health = dict(_STATE.get("rpc_health", {}).get(key, {}))
+    health.setdefault("device_id", key)
+    health.setdefault("topic", selected["request_topic"])
+    health.setdefault("last_probe_at_ms", 0)
+    health.setdefault("last_probe_ok", None)
+    health.setdefault("last_success_at_ms", 0)
+    health.setdefault("inflight_count", 0)
+    return json.dumps(health, ensure_ascii=False)
+
+
+def _record_rpc_start(selected):
+    if not selected:
+        return
+    key = selected.get("id") or selected.get("request_topic")
+    if not key:
+        return
+    with _STATE["lock"]:
+        health = _STATE.setdefault("rpc_health", {}).setdefault(key, {
+            "device_id": key,
+            "topic": selected.get("request_topic", "unknown"),
+            "last_success_at_ms": 0,
+            "last_probe_at_ms": 0,
+            "last_probe_ok": None,
+            "inflight_count": 0,
+        })
+        health["inflight_count"] = health.get("inflight_count", 0) + 1
+
+
+def _record_rpc_health(selected, succeeded):
+    if not selected:
+        return
+    key = selected.get("id") or selected.get("request_topic")
+    if not key:
+        return
+    now = int(time.time() * 1000)
+    with _STATE["lock"]:
+        health = _STATE.setdefault("rpc_health", {}).setdefault(key, {
+            "device_id": key,
+            "topic": selected.get("request_topic", "unknown"),
+            "last_success_at_ms": 0,
+        })
+        health["topic"] = selected.get("request_topic", health.get("topic", "unknown"))
+        health["inflight_count"] = max(0, health.get("inflight_count", 0) - 1)
+        health["last_probe_at_ms"] = now
+        health["last_probe_ok"] = bool(succeeded)
+        if succeeded:
+            health["last_success_at_ms"] = now
 
 
 def update_device_settings(existing_device, values):
@@ -362,26 +476,81 @@ def _device_config(device=None):
 
 def rpc(code, device=None):
     """Execute short control code through the existing MQTT racing client."""
-    client_mqtt = _mqtt_client_module()
-    selected = _device_config(device)
-    private_key = selected.get("private_key") or None
-    aliyun = json.dumps(load_config().get("aliyun") or {}, ensure_ascii=False)
-    code = (
-        "import sys\n"
-        f"sys.__dict__.setdefault('_qgb_dict', {{}}).setdefault('aliyun_git', {{}}).update({aliyun})\n"
-        + code
-    )
+    request_id = uuid.uuid4().hex[:8]
     started = time.perf_counter()
-    response = client_mqtt.rpc(
-        code,
-        request_topic=selected["request_topic"],
-        timeout=float(selected.get("timeout", 10)),
-        client_private_key_bytes=private_key,
-        allow_no_server_pubkey_response=bool(selected.get("allow_no_server_pubkey_response", False)),
-    )
+    selected = None
+    timeout = None
+    try:
+        selected = _device_config(device)
+        _record_rpc_start(selected)
+        timeout = float(selected.get("timeout", 10))
+        topic = selected["request_topic"]
+        _append_rpc_log(f"INFO id={request_id} topic={topic} phase=loading-client timeout={timeout:g}s")
+        client_mqtt = _mqtt_client_module()
+        aliyun = json.dumps(load_config().get("aliyun") or {}, ensure_ascii=False)
+        code = (
+            "import sys\n"
+            f"sys.__dict__.setdefault('_qgb_dict', {{}}).setdefault('aliyun_git', {{}}).update({aliyun})\n"
+            + code
+        )
+        _append_rpc_log(f"INFO id={request_id} topic={topic} phase=request-sent")
+        response = client_mqtt.rpc(
+            code,
+            request_topic=topic,
+            timeout=timeout,
+            client_private_key_bytes=selected.get("private_key") or None,
+            allow_no_server_pubkey_response=bool(selected.get("allow_no_server_pubkey_response", False)),
+        )
+    except BaseException as error:
+        _record_rpc_health(selected, False)
+        topic = selected.get("request_topic", "unknown") if selected else "unknown"
+        elapsed = round((time.perf_counter() - started) * 1000, 2)
+        detail = f"{type(error).__name__}: {error}"[:300]
+        _append_rpc_log(
+            f"ERROR id={request_id} topic={topic} phase=exception elapsed_ms={elapsed} "
+            f"exception_type={type(error).__name__}"
+        )
+        return {
+            "ok": False,
+            "error": detail,
+            "request_id": request_id,
+            "topic": topic,
+            "elapsed_ms": elapsed,
+        }
+    elapsed = round((time.perf_counter() - started) * 1000, 2)
     if response is None:
-        return {"ok": False, "error": "RPC timeout", "elapsed_ms": round((time.perf_counter() - started) * 1000, 2)}
-    response["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 2)
+        _record_rpc_health(selected, False)
+        node = getattr(client_mqtt, "_default_client", None)
+        clients = getattr(getattr(node, "mqtt_net", None), "clients", {})
+        states = []
+        for host, client in clients.items():
+            try:
+                state = "connected" if client.is_connected() else "disconnected"
+            except Exception:
+                state = "unknown"
+            states.append(f"{host}:{state}")
+        broker_state = ",".join(states) or "no broker clients"
+        _append_rpc_log(
+            f"WARN id={request_id} topic={topic} phase=timeout elapsed_ms={elapsed} "
+            f"timeout={timeout:g}s brokers=[{broker_state}]"
+        )
+        return {
+            "ok": False,
+            "error": "RPC timeout",
+            "request_id": request_id,
+            "topic": topic,
+            "elapsed_ms": elapsed,
+            "broker_states": states,
+        }
+    response["elapsed_ms"] = elapsed
+    response["request_id"] = request_id
+    _record_rpc_health(selected, True)
+    _append_rpc_log(
+        f"INFO id={request_id} req_id={response.get('req_id', 'unknown')} topic={topic} "
+        f"phase=response elapsed_ms={elapsed} server_time={response.get('server_time', 'unknown')} "
+        f"server={response.get('server_from', 'unknown')} client={response.get('client_from', 'unknown')} "
+        f"remote_latency_ms={response.get('latency_ms', 'unknown')}"
+    )
     return response
 
 
@@ -432,7 +601,14 @@ def parse_json_result(response):
     else:
         value = response
     try:
-        return json.loads(value) if isinstance(value, str) else value
+        result = json.loads(value) if isinstance(value, str) else value
+        metadata_fields = (
+            "req_id", "request_id", "server_time", "server_from", "latency_ms", "client_from", "elapsed_ms",
+        )
+        metadata = {key: response[key] for key in metadata_fields if key in response}
+        if metadata and isinstance(result, dict):
+            result["_rpc"] = metadata
+        return result
     except (TypeError, ValueError) as exc:
         return {"ok": False, "error": f"invalid RPC JSON: {exc}", "raw": str(value)[:500]}
 

@@ -14,14 +14,17 @@
 - Completed: fixed Chaquopy flat-module import crash reported by device log; `client_mqtt.py` loads as a top-level sibling of flat `multi_mqtt.py`.
 - Completed: added settings back handling, migrated Aliyun to shared configuration, passed key expressions to upstream normalization, and surfaced Wi-Fi failures in the page.
 - Completed: feature dispatcher converts Python exceptions and `SystemExit` to structured UI errors; broken runtime feature regression test passes.
-- Completed: Wi-Fi RPC through `feature_wifi.info()` with the user's `2**128` key, `sys/device/k12`, and 5-second timeout returned `192.168.1.106`; an earlier `2**64` probe timed out because it used different parameters.
-- Completed: Python tests pass (`22/22`); `./debug_build_secexp.sh` generated and verified `out/com.qgb.client-1-arm64-v8a.apk` with the import, Aliyun, key, navigation, and feature exception fixes.
+- Completed: topic settings can normalize private-key expressions to PEM using upstream `get_standard_pem_bytes`.
+- Completed: App RPC diagnostics show request topic, phase, elapsed time, response brokers, and timeout connection states without logging secrets or RPC source.
+- Completed: RPC metadata is attached to feature results; shared online probe enable/interval settings track health per topic and successful RPCs defer the next probe.
+- Completed: Wi-Fi RPC through `feature_wifi.info()` with the user's `233` key, `sys/device/k12`, and 5-second timeout returned `192.168.1.106`; an earlier `2**64` probe timed out because it used different parameters.
+- Completed: Python tests pass (`29/29`); `./debug_build_secexp.sh` generated and verified `out/com.qgb.client-1-arm64-v8a.apk` with RPC metadata and configurable deferred probing.
 - Pending: install and exercise the app UI on Android; validate two responders, pagination, file/Aliyun transfer, both cameras, permissions, external storage, and runtime feature installation.
 
 ## Last validation
 - `bash -n debug_build_secexp.sh`: passed.
-- `python3 -m unittest discover -s tests`: passed (`22/22`), including runtime feature `RuntimeError` and `SystemExit` containment.
-- Wi-Fi feature RPC with the exact `2**128` sample parameters: passed; returned `192.168.1.106` and MAC metadata.
+- `python3 -m unittest discover -s tests`: passed (`29/29`), including probe settings, response metadata, health updates, and redacted timeout logs.
+- Wi-Fi feature RPC with the exact `233` sample parameters: passed; returned `192.168.1.106` and MAC metadata.
 - `./debug_build_secexp.sh`: passed; APK metadata reports version code `1` and signature verification passed.
 - Kotlin `:app:compileDebugKotlin`: passed; only existing deprecation warnings remain.
 - Kotlin/Python workspace diagnostics and `git diff --check`: passed.

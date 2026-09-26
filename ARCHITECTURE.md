@@ -15,6 +15,10 @@ The generated `multi_mqtt` directory contains upstream flat modules. `client_ser
 
 When an external script root is selected, the app can install missing feature modules directly into its `py_updates/` using GitHub with timeouts, host fallback, exponential retry, atomic writes, and a UI-polled operation log.
 
+`client_service.rpc()` writes a bounded in-memory diagnostic log. The top-bar RPC logs page polls and displays topic, phase, elapsed time, response broker, and broker connection states after timeouts. Private keys, Aliyun values, and submitted RPC source are excluded.
+
+Online probing is controlled by shared config (`online_probe_enabled`, `online_probe_interval`). Health is tracked per target. A successful feature RPC refreshes the target's last-success/last-probe timestamp, so periodic `online()` probes wait until the configured interval elapses and never overlap an in-flight RPC.
+
 ## Remote device
 RPC code runs on the target device. Directory browsing uses bounded `os.walk` and `os.stat`. File content and photos are uploaded through the target device's `aliyun_git` module, then downloaded by the client.
 

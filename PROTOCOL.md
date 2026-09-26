@@ -3,6 +3,9 @@
 ## Target selection and setup
 The selected target record determines the MQTT `request_topic` and connection options for each RPC. Shared Aliyun configuration is stored once at the root of `client_mqtt.json`. Before submitted feature code runs, the client prepends a short Python setup block which merges this global Aliyun JSON object into `sys._qgb_dict["aliyun_git"]`. This does not add fields to the MQTT request envelope; it initializes the target interpreter for the existing code payload. Do not log the configuration because it may contain credentials.
 
+## RPC envelope metadata
+The feature result retains MQTT response metadata under `_rpc`: `req_id`, `server_time`, `server_from`, `client_from`, `latency_ms`, and local `elapsed_ms`/`request_id` when available. The app diagnostics log records the same transport details plus topic, phase, and broker connection states on timeout. It must never include the private key, Aliyun values, or submitted RPC code.
+
 ## Browse request
 The generated target code receives:
 

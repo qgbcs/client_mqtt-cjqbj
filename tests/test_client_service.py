@@ -16,6 +16,25 @@ import feature_wifi
 
 
 class ClientServiceTests(unittest.TestCase):
+    def test_general_online_probe_settings_have_defaults_and_bounds(self):
+        previous_state = client_service._STATE.copy()
+        with tempfile.TemporaryDirectory() as files_dir:
+            try:
+                client_service.initialize(files_dir)
+                defaults = json.loads(client_service.general_settings())
+                self.assertTrue(defaults["online_probe_enabled"])
+                self.assertEqual(defaults["online_probe_interval"], 30)
+
+                updated = json.loads(client_service.update_general_settings({
+                    "online_probe_enabled": False,
+                    "online_probe_interval": 99999,
+                }))
+                self.assertFalse(updated["online_probe_enabled"])
+                self.assertEqual(updated["online_probe_interval"], 3600)
+            finally:
+                client_service._STATE.clear()
+                client_service._STATE.update(previous_state)
+
     def test_mqtt_loader_uses_flat_modules_not_package_submodules(self):
         previous_file = client_service.__file__
         previous_path = list(sys.path)
@@ -98,6 +117,115 @@ class ClientServiceTests(unittest.TestCase):
                     client_service.rpc("r = {}")
 
                 self.assertEqual(mqtt_module.rpc.call_args.kwargs["client_private_key_bytes"], "2**64")
+            finally:
+                client_service._STATE.clear()
+                client_service._STATE.update(previous_state)
+
+    def test_private_key_standardization_uses_upstream_normalizer(self):
+        mqtt_module = mock.Mock()
+        mqtt_module.get_standard_pem_bytes.return_value = b"-----BEGIN EC PRIVATE KEY-----\nredacted\n"
+        with mock.patch.object(client_service, "_mqtt_client_module", return_value=mqtt_module):
+            result = client_service.standardize_private_key("233")
+        self.assertTrue(result.startswith("-----BEGIN EC PRIVATE KEY-----"))
+        mqtt_module.get_standard_pem_bytes.assert_called_once_with("233")
+
+    def test_private_key_standardization_converts_2_pow_128_to_pem(self):
+        pem = client_service.standardize_private_key("233")
+        self.assertTrue(pem.startswith("-----BEGIN EC PRIVATE KEY-----"))
+        self.assertTrue(pem.rstrip().endswith("-----END EC PRIVATE KEY-----"))
+
+    def test_private_key_standardization_accepts_exponent_expression(self):
+        pem = client_service.standardize_private_key("233")
+        self.assertTrue(pem.startswith("-----BEGIN EC PRIVATE KEY-----"))
+        self.assertTrue(pem.rstrip().endswith("-----END EC PRIVATE KEY-----"))
+
+    def test_rpc_timeout_logs_topic_elapsed_and_broker_state_without_secrets(self):
+        previous_state = client_service._STATE.copy()
+        with tempfile.TemporaryDirectory() as files_dir:
+            try:
+                client_service.initialize(files_dir)
+                client_service.update_device_settings("sys/device/request", {
+                    "request_topic": "sys/device/k12",
+                    "private_key": "DO_NOT_LOG_THIS_KEY",
+                    "timeout": 5,
+                })
+                broker_client = mock.Mock()
+                broker_client.is_connected.return_value = False
+                mqtt_module = mock.Mock()
+                mqtt_module.rpc.return_value = None
+                mqtt_module._default_client = mock.Mock(
+                    mqtt_net=mock.Mock(clients={"broker.example": broker_client})
+                )
+                with mock.patch.object(client_service, "_mqtt_client_module", return_value=mqtt_module):
+                    result = client_service.rpc("wifi probe")
+
+                self.assertEqual(result["error"], "RPC timeout")
+                self.assertEqual(result["topic"], "sys/device/k12")
+                self.assertEqual(result["broker_states"], ["broker.example:disconnected"])
+                logs = "\n".join(json.loads(client_service.rpc_logs()))
+                self.assertIn("topic=sys/device/k12", logs)
+                self.assertIn("brokers=[broker.example:disconnected]", logs)
+                self.assertNotIn("DO_NOT_LOG_THIS_KEY", logs)
+            finally:
+                client_service._STATE.clear()
+                client_service._STATE.update(previous_state)
+
+    def test_rpc_success_log_correlates_response_without_logging_source_code(self):
+        previous_state = client_service._STATE.copy()
+        with tempfile.TemporaryDirectory() as files_dir:
+            try:
+                client_service.initialize(files_dir)
+                client_service.update_device_settings("sys/device/request", {
+                    "request_topic": "sys/device/k12",
+                })
+                mqtt_module = mock.Mock()
+                mqtt_module.rpc.return_value = {
+                    "ok": True,
+                    "r": "{}",
+                    "req_id": "server-req-1",
+                    "server_time": 1790421445203,
+                    "latency_ms": 329.5,
+                    "server_from": "server-broker",
+                    "client_from": "client-broker",
+                }
+                with mock.patch.object(client_service, "_mqtt_client_module", return_value=mqtt_module):
+                    response = client_service.rpc("DO_NOT_LOG_RPC_SOURCE")
+
+                logs = "\n".join(json.loads(client_service.rpc_logs()))
+                self.assertIn("topic=sys/device/k12", logs)
+                self.assertIn("phase=response", logs)
+                self.assertIn("req_id=server-req-1", logs)
+                self.assertIn("server_time=1790421445203", logs)
+                self.assertIn("server=server-broker", logs)
+                self.assertIn("client=client-broker", logs)
+                self.assertNotIn("DO_NOT_LOG_RPC_SOURCE", logs)
+                parsed = client_service.parse_json_result(response)
+                self.assertEqual(parsed["_rpc"]["req_id"], "server-req-1")
+                health = json.loads(client_service.target_health("sys/device/k12"))
+                self.assertTrue(health["last_probe_ok"])
+                self.assertGreater(health["last_success_at_ms"], 0)
+                self.assertEqual(health["inflight_count"], 0)
+            finally:
+                client_service._STATE.clear()
+                client_service._STATE.update(previous_state)
+
+    def test_rpc_exception_logs_type_but_not_exception_payload(self):
+        previous_state = client_service._STATE.copy()
+        with tempfile.TemporaryDirectory() as files_dir:
+            try:
+                client_service.initialize(files_dir)
+                client_service.update_device_settings("sys/device/request", {
+                    "request_topic": "sys/device/k12",
+                })
+                mqtt_module = mock.Mock()
+                mqtt_module.rpc.side_effect = ValueError("private key rejected: SECRET_VALUE")
+                with mock.patch.object(client_service, "_mqtt_client_module", return_value=mqtt_module):
+                    result = client_service.rpc("wifi probe")
+
+                self.assertIn("SECRET_VALUE", result["error"])
+                logs = "\n".join(json.loads(client_service.rpc_logs()))
+                self.assertIn("exception_type=ValueError", logs)
+                self.assertNotIn("SECRET_VALUE", logs)
             finally:
                 client_service._STATE.clear()
                 client_service._STATE.update(previous_state)

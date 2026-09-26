@@ -57,6 +57,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Switch
 import androidx.compose.material3.rememberDrawerState
@@ -127,6 +128,7 @@ private fun ClientMqttScreen() {
     val drawerState = rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
     var settings by remember { mutableStateOf(false) }
     var targetSettings by remember { mutableStateOf(false) }
+    var diagnostics by remember { mutableStateOf(false) }
     var editingDeviceId by remember { mutableStateOf<String?>(null) }
     var permissions by remember { mutableStateOf(false) }
     var selectedDevice by remember { mutableStateOf("Target") }
@@ -134,6 +136,8 @@ private fun ClientMqttScreen() {
     var selectedTopic by remember { mutableStateOf("sys/device/request") }
     var targetRemoteRoot by remember { mutableStateOf("/data/data") }
     var onlineStatus by remember { mutableStateOf("checking") }
+    var onlineProbeEnabled by remember { mutableStateOf(true) }
+    var onlineProbeInterval by remember { mutableStateOf(30) }
     val service = remember { Python.getInstance().getModule("client_service") }
     val scope = rememberCoroutineScope()
 
@@ -224,6 +228,19 @@ private fun ClientMqttScreen() {
         }
     }
 
+    LaunchedEffect(Unit) {
+        while (true) {
+            runCatching {
+                val config = withContext(Dispatchers.IO) {
+                    JSONObject(service.callAttr("general_settings").toString())
+                }
+                onlineProbeEnabled = config.optBoolean("online_probe_enabled", true)
+                onlineProbeInterval = config.optInt("online_probe_interval", 30).coerceIn(5, 3600)
+            }
+            delay(1_000)
+        }
+    }
+
     LaunchedEffect(selectedTopic) {
         targetRemoteRoot = withContext(Dispatchers.IO) {
             runCatching {
@@ -231,13 +248,31 @@ private fun ClientMqttScreen() {
                     .optString("remote_root", "/data/data")
             }.getOrDefault("/data/data")
         }
+    }
+
+    LaunchedEffect(selectedDeviceId, onlineProbeEnabled, onlineProbeInterval) {
         while (true) {
-            onlineStatus = withContext(Dispatchers.IO) {
-                runCatching { JSONObject(service.callAttr("online").toString()).optBoolean("ok") }
-                    .getOrDefault(false)
-                    .let { if (it) "online" else "offline" }
+            val health = withContext(Dispatchers.IO) {
+                runCatching { JSONObject(service.callAttr("target_health", selectedDeviceId).toString()) }
+                    .getOrElse { JSONObject() }
             }
-            delay(30_000)
+            val lastProbeAt = health.optLong("last_probe_at_ms", 0)
+            val inFlight = health.optInt("inflight_count", 0)
+            val lastProbeOk = health.optBoolean("last_probe_ok", false)
+            onlineStatus = when {
+                inFlight > 0 -> "checking"
+                lastProbeAt == 0L -> "checking"
+                lastProbeOk -> "online"
+                else -> "offline"
+            }
+
+            val probeDue = lastProbeAt == 0L || System.currentTimeMillis() - lastProbeAt >= onlineProbeInterval * 1_000L
+            if (onlineProbeEnabled && inFlight == 0 && probeDue && selectedDeviceId.isNotBlank()) {
+                withContext(Dispatchers.IO) {
+                    runCatching { service.callAttr("online", selectedDeviceId) }
+                }
+            }
+            delay(1_000)
         }
     }
 
@@ -247,11 +282,12 @@ private fun ClientMqttScreen() {
         }
     }
 
-    BackHandler(enabled = permissions || targetSettings || settings) {
+    BackHandler(enabled = permissions || targetSettings || settings || diagnostics) {
         when {
             permissions -> permissions = false
             targetSettings -> targetSettings = false
             settings -> settings = false
+            diagnostics -> diagnostics = false
         }
     }
 
@@ -326,6 +362,9 @@ private fun ClientMqttScreen() {
                     },
                     actions = {
                         if (!settings && !targetSettings && !permissions) {
+                            TextButton(onClick = { diagnostics = true }) {
+                                Text("RPC logs")
+                            }
                             IconButton(onClick = { scope.launch { drawerState.open() } }) {
                                 Icon(Icons.Outlined.Menu, contentDescription = "Scripts and targets")
                             }
@@ -345,7 +384,14 @@ private fun ClientMqttScreen() {
                 )
             }
         ) { padding ->
-            if (permissions) {
+            if (diagnostics) {
+                DiagnosticsPage(
+                    modifier = Modifier.padding(padding),
+                    selectedTopic = selectedTopic,
+                    onlineStatus = onlineStatus,
+                    onBack = { diagnostics = false }
+                )
+            } else if (permissions) {
                 PermissionPage(onBack = { permissions = false })
             } else if (targetSettings) {
                 TargetSettingsPage(
@@ -590,6 +636,75 @@ private fun WifiPage() {
 }
 
 @Composable
+private fun DiagnosticsPage(
+    modifier: Modifier = Modifier,
+    selectedTopic: String,
+    onlineStatus: String,
+    onBack: () -> Unit
+) {
+    var logs by remember { mutableStateOf(listOf<String>()) }
+    var status by remember { mutableStateOf("") }
+    val service = remember { Python.getInstance().getModule("client_service") }
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            runCatching {
+                val raw = withContext(Dispatchers.IO) { service.callAttr("rpc_logs").toString() }
+                val array = org.json.JSONArray(raw)
+                val updated = buildList {
+                    for (index in 0 until array.length()) add(array.optString(index))
+                }
+                if (updated != logs) logs = updated
+            }.onFailure { status = "Unable to read RPC diagnostics: ${it.message}" }
+            delay(500)
+        }
+    }
+
+    LaunchedEffect(logs.size) {
+        if (logs.isNotEmpty()) listState.animateScrollToItem(logs.lastIndex)
+    }
+
+    Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Column {
+                Text("RPC diagnostics", style = MaterialTheme.typography.titleLarge)
+                Text("$selectedTopic · $onlineStatus", style = MaterialTheme.typography.bodySmall)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = {
+                    scope.launch {
+                        runCatching {
+                            withContext(Dispatchers.IO) { service.callAttr("clear_rpc_logs") }
+                            logs = emptyList()
+                            status = ""
+                        }.onFailure { status = "Unable to clear logs: ${it.message}" }
+                    }
+                }) { Text("Clear") }
+                TextButton(onClick = onBack) { Text("Done") }
+            }
+        }
+        Text("Keys, Aliyun credentials, and RPC source code are excluded from this log.", style = MaterialTheme.typography.bodySmall)
+        if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.bodySmall)
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            if (logs.isEmpty()) {
+                item { Text("No RPC activity yet", style = MaterialTheme.typography.bodyMedium) }
+            } else {
+                items(logs) { entry ->
+                    Text(entry, style = MaterialTheme.typography.bodySmall)
+                    HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun DynamicFeaturePage(feature: FeatureDescriptor) {
     var result by remember(feature.name) { mutableStateOf("Ready") }
     val service = remember { Python.getInstance().getModule("client_service") }
@@ -627,10 +742,13 @@ private fun TargetSettingsPage(
     var privateKey by remember(existingDeviceId) { mutableStateOf("") }
     var timeout by remember(existingDeviceId) { mutableStateOf("10") }
     var allowNoServerKey by remember(existingDeviceId) { mutableStateOf(true) }
+    var normalizingPrivateKey by remember { mutableStateOf(false) }
+    var privateKeyStatus by remember { mutableStateOf("") }
     var loaded by remember(existingDeviceId) { mutableStateOf(existingDeviceId == null) }
     var lastLocalEdit by remember(existingDeviceId) { mutableStateOf(0L) }
     var status by remember { mutableStateOf("") }
     val service = remember { Python.getInstance().getModule("client_service") }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(deviceId, existingDeviceId) {
         val targetId = deviceId.ifBlank { existingDeviceId ?: return@LaunchedEffect }
@@ -704,13 +822,40 @@ private fun TargetSettingsPage(
             singleLine = true,
             label = { Text("Allowed remote root") }
         )
-        OutlinedTextField(
-            privateKey,
-            { privateKey = it; lastLocalEdit = System.currentTimeMillis() },
-            Modifier.fillMaxWidth(),
-            singleLine = true,
-            label = { Text("Client private key") }
-        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                privateKey,
+                { privateKey = it; lastLocalEdit = System.currentTimeMillis() },
+                Modifier.weight(1f),
+                minLines = 1,
+                maxLines = 4,
+                label = { Text("Client private key") }
+            )
+            Button(
+                enabled = !normalizingPrivateKey && privateKey.isNotBlank(),
+                onClick = {
+                    normalizingPrivateKey = true
+                    privateKeyStatus = "Normalizing key..."
+                    scope.launch {
+                        try {
+                            val normalized = withContext(Dispatchers.IO) {
+                                service.callAttr("standardize_private_key", privateKey).toString()
+                            }
+                            privateKey = normalized
+                            lastLocalEdit = System.currentTimeMillis()
+                            privateKeyStatus = "Normalized to PEM; saving to client_mqtt.json"
+                        } catch (error: Exception) {
+                            privateKeyStatus = "Key normalization failed: ${error.message}"
+                        } finally {
+                            normalizingPrivateKey = false
+                        }
+                    }
+                }
+            ) {
+                Text(if (normalizingPrivateKey) "Working..." else "Standardize")
+            }
+        }
+        if (privateKeyStatus.isNotBlank()) Text(privateKeyStatus, style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(
             timeout,
             { timeout = it.filter { char -> char.isDigit() || char == '.' }; lastLocalEdit = System.currentTimeMillis() },
@@ -748,6 +893,11 @@ private fun SettingsPage(
     var aliyunLoaded by remember { mutableStateOf(false) }
     var aliyunLastEdit by remember { mutableStateOf(0L) }
     var aliyunStatus by remember { mutableStateOf("") }
+    var onlineProbeEnabled by remember { mutableStateOf(true) }
+    var onlineProbeInterval by remember { mutableStateOf("30") }
+    var probeSettingsLoaded by remember { mutableStateOf(false) }
+    var probeSettingsLastEdit by remember { mutableStateOf(0L) }
+    var probeSettingsStatus by remember { mutableStateOf("") }
     var downloadStatus by remember { mutableStateOf("") }
     var downloadLogs by remember { mutableStateOf(listOf<String>()) }
     var downloading by remember { mutableStateOf(false) }
@@ -817,6 +967,40 @@ private fun SettingsPage(
         }.onFailure { aliyunStatus = "Aliyun settings save failed: ${it.message}" }
     }
 
+    LaunchedEffect(Unit) {
+        while (true) {
+            runCatching {
+                val config = withContext(Dispatchers.IO) {
+                    JSONObject(service.callAttr("general_settings").toString())
+                }
+                if (System.currentTimeMillis() - probeSettingsLastEdit >= 1_200L) {
+                    onlineProbeEnabled = config.optBoolean("online_probe_enabled", true)
+                    onlineProbeInterval = config.optInt("online_probe_interval", 30).toString()
+                    probeSettingsLoaded = true
+                }
+            }.onFailure { probeSettingsStatus = "Unable to sync probe settings: ${it.message}" }
+            delay(1_000)
+        }
+    }
+
+    LaunchedEffect(onlineProbeEnabled, onlineProbeInterval, probeSettingsLoaded) {
+        if (!probeSettingsLoaded) return@LaunchedEffect
+        val interval = onlineProbeInterval.toIntOrNull() ?: return@LaunchedEffect
+        delay(300)
+        runCatching {
+            withContext(Dispatchers.IO) {
+                service.callAttr(
+                    "update_general_settings",
+                    JSONObject()
+                        .put("online_probe_enabled", onlineProbeEnabled)
+                        .put("online_probe_interval", interval.coerceIn(5, 3600))
+                        .toString()
+                )
+            }
+            probeSettingsStatus = "Online probe settings saved"
+        }.onFailure { probeSettingsStatus = "Probe settings save failed: ${it.message}" }
+    }
+
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -847,6 +1031,34 @@ private fun SettingsPage(
             label = { Text("Aliyun configuration JSON") }
         )
         Text(aliyunStatus, style = MaterialTheme.typography.bodySmall)
+        HorizontalDivider()
+        Text("Online status probe", style = MaterialTheme.typography.titleMedium)
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Enable periodic probe")
+            Switch(
+                checked = onlineProbeEnabled,
+                onCheckedChange = {
+                    onlineProbeEnabled = it
+                    probeSettingsLastEdit = System.currentTimeMillis()
+                }
+            )
+        }
+        OutlinedTextField(
+            onlineProbeInterval,
+            {
+                onlineProbeInterval = it.filter(Char::isDigit)
+                probeSettingsLastEdit = System.currentTimeMillis()
+            },
+            Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Probe interval in seconds") }
+        )
+        Text("After any successful RPC, the next probe waits for this interval. Minimum 5 seconds.", style = MaterialTheme.typography.bodySmall)
+        Text(probeSettingsStatus, style = MaterialTheme.typography.bodySmall)
         if (useExternal && externalAllowed) {
             HorizontalDivider()
             Text("External feature scripts", style = MaterialTheme.typography.titleMedium)
