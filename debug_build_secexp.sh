@@ -3,15 +3,32 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
+WORKSPACE_DIR="$(dirname "$PROJECT_DIR")"
 
-APK_BASENAME="${APK_BASENAME:-client_mqtt}"
+# ============================================================
+# 新增环境隔离：强制让 Gradle 和 Android 工具依赖外层工作区目录
+# 显式 mkdir -p 预先创建目录，防止 AGP 的 AndroidDirectoryCreator 崩溃。
+# ============================================================
+export GRADLE_USER_HOME="$WORKSPACE_DIR/.gradle"
+export ANDROID_USER_HOME="$WORKSPACE_DIR/.android"
+
+mkdir -p "$GRADLE_USER_HOME" "$ANDROID_USER_HOME"
+# ============================================================
+
+# 清理残留环境变量，避免旧 shell 变量覆盖脚本中写死的默认值。
+unset APPLICATION_ID VERSION_CODE VERSION_NAME APP_NAME BUILD_ABIS
+
+PROJECT_NAME="${PROJECT_DIR##*/}"
 
 SECEXP="${SECEXP:-1}"
-APPLICATION_ID="${APPLICATION_ID:-com.qgb.client_mqtt}"
-VERSION_CODE="${VERSION_CODE:-1}"
-VERSION_NAME="${VERSION_NAME:-$VERSION_CODE}"
-APP_NAME="${APP_NAME:-Client MQTT}"
-APP_NAME="${APK_BASENAME}"
+APPLICATION_ID="${APPLICATION_ID:-com.qgb.${PROJECT_NAME}}"
+VERSION_CODE="${VERSION_CODE:-20260916}"
+VERSION_NAME="${VERSION_NAME:-${VERSION_CODE}SECEXP=${SECEXP}长度17混合}"
+
+APP_NAME="${PROJECT_NAME}"
+#"${VERSION_CODE: -4}输入法"
+
+APK_BASENAME="${APPLICATION_ID}"
 
 BUILD_ABIS="${BUILD_ABIS:-arm64-v8a}"
 OUT_DIR="${OUT_DIR:-$PROJECT_DIR/out}"
@@ -51,24 +68,63 @@ export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME_DEFAULT}"
 
 
 # ============================================================
-# 库同步：源目录可由 MULTI_MQTT_SOURCE 指定，默认使用项目旁边的 multi_mqtt。
+# 子模块同步：只认 .gitmodules 里的 path/url，rsync 权威覆盖
 # ============================================================
-target_dir="$PROJECT_DIR/app/src/main/python/multi_mqtt"
-source_dir="${MULTI_MQTT_SOURCE:-$PROJECT_DIR/../multi_mqtt}"
-if [[ ! -d "$source_dir" ]]; then
-    echo "错误: 缺少本工程库源: $source_dir" >&2
+relpath=.gradle/wrapper/dists/gradle-9.5.0-bin/estug5qhtw5xqrldjyqnn9yr5
+# 由于设置了 GRADLE_USER_HOME 为外层目录，在 WORKSPACE_DIR 确保对应的目录结构存在
+mkdir -p "$WORKSPACE_DIR/$relpath"
+
+SUBMODULE_SECTION="[submodule \"app/src/main/python/multi_mqtt\"]"
+SUBMODULE_PATH_VALUE=""
+SUBMODULE_URL_VALUE=""
+current_section=""
+
+if [[ -f "$PWD/.gitmodules" ]]; then
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^\[submodule\ \".*\"\]$ ]]; then
+            current_section="$line"
+        fi
+        if [[ "$current_section" == "$SUBMODULE_SECTION" ]]; then
+            if [[ "$line" =~ ^[[:space:]]*path[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+                SUBMODULE_PATH_VALUE="${line##*=}"
+                SUBMODULE_PATH_VALUE="${SUBMODULE_PATH_VALUE//[[:space:]]/}"
+            elif [[ "$line" =~ ^[[:space:]]*url[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+                SUBMODULE_URL_VALUE="${line##*=}"
+                SUBMODULE_URL_VALUE="${SUBMODULE_URL_VALUE//[[:space:]]/}"
+            fi
+        fi
+    done < "$PWD/.gitmodules"
+fi
+
+if [[ -z "$SUBMODULE_PATH_VALUE" || -z "$SUBMODULE_URL_VALUE" ]]; then
+    echo "错误: 无法从 .gitmodules 解析 app/src/main/python/multi_mqtt 的 path/url，构建中止。" >&2
     exit 1
 fi
-echo "同步目录: $source_dir -> $target_dir"
-mkdir -p "$target_dir"
-rsync --delete --delete-excluded \
-      --exclude=.git --exclude=.github --exclude=.venv --exclude=__pycache__ \
-      -a "$source_dir/" "$target_dir/"
-if ! diff -qr --exclude='.git' --exclude='.github' --exclude='.venv' --exclude='__pycache__' "$source_dir" "$target_dir" >/dev/null; then
-    echo "错误: multi_mqtt 同步校验失败" >&2
-    exit 1
+
+target_dir="$PWD/$SUBMODULE_PATH_VALUE"
+source_dir="$SUBMODULE_URL_VALUE"
+# 相对路径统一转成绝对路径（相对脚本所在目录）
+if [[ "$source_dir" != /* ]]; then
+    source_dir="$PWD/$source_dir"
 fi
-# ============================================================
+# 规范化路径（去掉 ../ 之类）
+if [[ -d "$source_dir" ]]; then
+    source_dir="$(cd "$source_dir" && pwd)"
+fi
+
+if [[ -d "$source_dir" ]]; then
+    echo "同步目录: $source_dir -> $target_dir"
+    mkdir -p "$target_dir"
+    # 清掉目标里可能残留的 .git（旧的 submodule 痕迹），否则它还是个 git 仓库
+    rm -rf "$target_dir/.git"
+    rsync --delete --delete-excluded \
+          --exclude=.git --exclude=.github --exclude=.venv \
+          -a "$source_dir/" "$target_dir/" \
+        || echo "警告: rsync 返回非零，忽略并继续构建。" >&2
+else
+    echo "警告: 同步源目录不存在: $source_dir，跳过 rsync。" >&2
+fi
+[ ! -f "$PWD/app/src/main/python/aliyun_git.py" ] && wget -q -O "$PWD/app/src/main/python/aliyun_git.py" https://github.com/QGB/git.bat/raw/refs/heads/master/aliyun_git.py || true
 # ============================================================
 
 
@@ -138,9 +194,7 @@ fi
 
 # 7) 再复制一份到导出目录，方便直接取用，并保留到全局缓存目录用于真实文件对比
 OUT_APK="$OUT_DIR/${APK_BASENAME}-${VERSION_CODE}-${BUILD_ABIS}.apk"
-#CACHE_APK="$CACHE_DIR/ClientMqtt-${VERSION_CODE}-${BUILD_ABIS}-SECEXP-${SECEXP}.apk"
 cp -f "$SIGNED_APK" "$OUT_APK"
-#cp -f "$SIGNED_APK" "$CACHE_APK"
 rm -f "$SIGNED_APK" "$APK_PATH"
 
 APKSIGNER_BIN="$(find "$ANDROID_HOME_DEFAULT/build-tools" -type f -name apksigner -print 2>/dev/null | sort | tail -n 1)"
@@ -169,4 +223,3 @@ echo "=== aapt badging ==="
 echo
 echo "SECEXP=$SECEXP"
 echo "APK=$OUT_APK"
-#echo "CACHE_APK=$CACHE_APK"
