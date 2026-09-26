@@ -1,39 +1,28 @@
 # Progress
 
 ## Current state
-- Phase: project bootstrap.
-- Completed: copied the Android/Chaquopy template into the `client_mqtt/` project root.
-- Completed: configured `app/src/main/python/multi_mqtt` as the only project-local library copy.
-- Completed: changed the build identity to `ClientMqtt` and removed the external `.gitmodules` sync dependency.
-- Completed: added local sync verification to `debug_build_secexp.sh`.
-- Completed: replaced the copied input-method entry with a ClientMqtt application and Compose pager.
-- Completed: added bounded remote scan code generation with `has_more` and `next_offset`.
-- Completed: added in-memory photo and target Wi-Fi RPC code generators without embedding Aliyun credentials.
-- Completed: added bounded scan pagination to the Compose file list and JSON response parsing.
-- Completed: added target-side upload and client-side Aliyun download helpers for file transfer.
-- Completed: split files, camera, and Wi-Fi into independent `feature_*.py` modules.
-- Completed: added stable `bootstrap.py` with writable `files/py_updates` override and SHA-256 checked installation.
-- Completed: Android pages dispatch through the feature loader instead of importing feature implementations directly.
-- Completed: added all-permission settings page with runtime permission batch request and all-files access shortcut.
-- Completed: added internal/external script-root selection; external default is `/sdcard/apm/client_mqtt/` after authorization.
-- Completed: persisted Aliyun settings beside the selected script root and added file download/Bitmap preview flow.
-- Completed: added 30-second MQTT online polling status.
-- Completed: split files, camera, and Wi-Fi into independent Python feature modules.
-- Completed: added immutable bootstrap plus writable `files/py_updates` hot-reload path.
-- Completed: full root-level `./debug_build_secexp.sh` succeeded with Chaquopy Python 3.12.
-- Completed: generated `out/debug-secexp/ClientMqtt-20260925-arm64-v8a.apk` and verified its signature and package id.
-- Completed: focused Python tests pass (`5/5`), including runtime replacement and reload.
-- In progress: validate runtime feature replacement on an Android device.
-- In progress: finish Python callback/log plumbing, file transfer, image display, and device polling.
-- Pending: install the APK on a real device and validate both cameras, all permission flows, external storage, Aliyun transfer, and runtime feature installation.
+- Phase: feature implementation complete; device integration validation remains.
+- Completed: Android Compose app with feature pager, left-edge drawer for scripts and targets, online status, permissions, and local script-root selection.
+- Completed: per-topic target configuration with stable IDs; request topic, remote root, Aliyun JSON, private key, timeout, and signature fallback are automatically saved and refreshed from external file edits.
+- Completed: Python service, bounded remote scan pagination, file transfer, in-memory photo capture, Wi-Fi query, and runtime feature loading.
+- Completed: compatible loading of the vendored flat `multi_mqtt.py` library from the app's same-name directory; generated library files remain build-synchronized.
+- Completed: static catalog for the three Chaquopy-bundled features, even when the APK has no loose `.py` source entries.
+- Completed: Python installer for missing files/camera/wifi scripts in an external `py_updates/`, with alternate GitHub URLs, timeouts, retries, atomic writes, and a visible polling log.
+- Completed: moved camera target-code generation into `feature_camera.py`; the Activity only dispatches capture actions.
+- Completed: moved Wi-Fi query generation and bounded scan/upload generation into `feature_wifi.py` and `feature_files.py`; `client_service` no longer exposes those feature-specific helpers.
+- Completed: feature actions return explicit JSON; Compose formats Wi-Fi data and downloads/decodes photo URLs for preview.
+- Completed: target Wi-Fi RPC to `sys/device/k12` returned `192.168.1.106`.
+- Completed: Python tests pass (`17/17`); `./debug_build_secexp.sh` generated and verified `out/com.qgb.client-20260916-arm64-v8a.apk` after the independent feature refactor.
+- Pending: install and exercise the app UI on Android; validate two responders, pagination, file/Aliyun transfer, both cameras, permissions, external storage, and runtime feature installation.
 
 ## Last validation
 - `bash -n debug_build_secexp.sh`: passed.
-- Local `multi_mqtt` and generated Python copy comparison: passed.
-- Python service syntax and generated-code checks: passed.
-- Android `:app:compileDebugKotlin`: passed, with a deprecation warning for `ScrollableTabRow`.
-- Full root-level APK build: passed; NDK strip warnings come from the container SDK mismatch.
-- Device integration tests: not run yet.
+- `python3 -m unittest discover -s tests`: passed (`17/17`) after moving Wi-Fi, scan, and upload code generation into their feature modules.
+- Wi-Fi feature RPC through `feature_wifi.info()` for `sys/device/k12`: passed; returned `192.168.1.106` and MAC metadata.
+- `./debug_build_secexp.sh`: passed; APK signature and package metadata verified.
+- Kotlin `:app:compileDebugKotlin`: passed; only existing deprecation warnings remain.
+- Kotlin/Python workspace diagnostics and `git diff --check`: passed.
+- Full Android UI/device integration suite, including live external-file refresh and GitHub download on a device: not run.
 
 ## Next step
-Connect the remaining capture/download callbacks and settings persistence, then run a device-oriented validation.
+Install the generated APK and validate external script downloads on the target network, the visible retry log, feature override, camera capture/preview, and remaining device workflows.

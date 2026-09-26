@@ -11,8 +11,10 @@ import android.os.Environment
 import android.provider.Settings
 import android.util.Base64
 import android.net.Uri
+import java.io.File
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,16 +32,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.NetworkWifi
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.twotone.Security
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -47,6 +58,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Switch
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -80,6 +92,13 @@ private data class FeatureDescriptor(
     val actions: List<String>
 )
 
+private data class TargetDescriptor(
+    val id: String,
+    val name: String,
+    val requestTopic: String,
+    val remoteRoot: String
+)
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 class MainActivity : ComponentActivity() {
     private val cameraPermission = registerForActivityResult(
@@ -101,15 +120,51 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ClientMqttScreen() {
     var features by remember { mutableStateOf(listOf<FeatureDescriptor>()) }
+    var targets by remember { mutableStateOf(listOf<TargetDescriptor>()) }
     val pagerState = rememberPagerState(pageCount = { features.size })
     val pagerScope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
     var settings by remember { mutableStateOf(false) }
+    var targetSettings by remember { mutableStateOf(false) }
+    var editingDeviceId by remember { mutableStateOf<String?>(null) }
     var permissions by remember { mutableStateOf(false) }
     var selectedDevice by remember { mutableStateOf("Target") }
+    var selectedDeviceId by remember { mutableStateOf("") }
+    var selectedTopic by remember { mutableStateOf("sys/device/request") }
+    var targetRemoteRoot by remember { mutableStateOf("/data/data") }
     var onlineStatus by remember { mutableStateOf("checking") }
     val service = remember { Python.getInstance().getModule("client_service") }
+    val scope = rememberCoroutineScope()
+
+    suspend fun refreshTargets() {
+        val raw = withContext(Dispatchers.IO) { service.callAttr("device_catalog").toString() }
+        val array = org.json.JSONArray(raw)
+        targets = buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val topic = item.optString("request_topic")
+                if (topic.isNotBlank()) add(TargetDescriptor(
+                    item.optString("id", topic),
+                    item.optString("name", topic),
+                    topic,
+                    item.optString("remote_root", "/data/data")
+                ))
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
+        runCatching {
+            refreshTargets()
+            val target = targets.firstOrNull()
+            if (target != null) {
+                selectedDeviceId = target.id
+                selectedTopic = target.requestTopic
+                selectedDevice = target.name
+                targetRemoteRoot = target.remoteRoot
+                service.callAttr("select_device", target.id)
+            }
+        }
         while (true) {
             runCatching {
                 val raw = withContext(Dispatchers.IO) { service.callAttr("feature_catalog").toString() }
@@ -133,7 +188,48 @@ private fun ClientMqttScreen() {
         }
     }
 
-    LaunchedEffect(selectedDevice) {
+    LaunchedEffect(Unit) {
+        while (true) {
+            runCatching {
+                val raw = withContext(Dispatchers.IO) { service.callAttr("device_catalog").toString() }
+                val array = org.json.JSONArray(raw)
+                val updated = buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val topic = item.optString("request_topic")
+                        if (topic.isNotBlank()) add(TargetDescriptor(
+                            item.optString("id", topic),
+                            item.optString("name", topic),
+                            topic,
+                            item.optString("remote_root", "/data/data")
+                        ))
+                    }
+                }
+                targets = updated
+                val active = updated.firstOrNull { it.id == selectedDeviceId }
+                    ?: updated.firstOrNull { it.requestTopic == selectedTopic }
+                    ?: updated.firstOrNull()
+                if (active != null) {
+                    if (active.id != selectedDeviceId || active.requestTopic != selectedTopic) {
+                        withContext(Dispatchers.IO) { service.callAttr("select_device", active.id) }
+                    }
+                    selectedDeviceId = active.id
+                    selectedTopic = active.requestTopic
+                    selectedDevice = active.name
+                    targetRemoteRoot = active.remoteRoot
+                }
+            }
+            delay(1_000)
+        }
+    }
+
+    LaunchedEffect(selectedTopic) {
+        targetRemoteRoot = withContext(Dispatchers.IO) {
+            runCatching {
+                JSONObject(service.callAttr("device_settings", selectedTopic).toString())
+                    .optString("remote_root", "/data/data")
+            }.getOrDefault("/data/data")
+        }
         while (true) {
             onlineStatus = withContext(Dispatchers.IO) {
                 runCatching { JSONObject(service.callAttr("online").toString()).optBoolean("ok") }
@@ -150,64 +246,146 @@ private fun ClientMqttScreen() {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(selectedDevice)
-                        Text(onlineStatus, style = MaterialTheme.typography.labelSmall)
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { settings = true }) {
-                        Icon(Icons.Outlined.Settings, contentDescription = "Settings")
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        if (permissions) {
-            PermissionPage(onBack = { permissions = false })
-        } else if (settings) {
-            SettingsPage(
-                modifier = Modifier.padding(padding),
-                onBack = { settings = false },
-                onDeviceChanged = { selectedDevice = it },
-                onPermissions = { permissions = true }
-            )
-        } else {
-            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                if (features.isEmpty()) {
-                    Text("No feature scripts found", modifier = Modifier.padding(16.dp))
-                } else {
-                    val selectedPage = pagerState.currentPage.coerceIn(0, features.lastIndex)
-                    ScrollableTabRow(selectedTabIndex = selectedPage) {
-                        features.forEachIndexed { index, feature ->
-                            Tab(
-                                selected = selectedPage == index,
-                                onClick = { pagerScope.launch { pagerState.animateScrollToPage(index) } },
-                                text = { Text(feature.title) },
-                                icon = {
-                                    Icon(
-                                        imageVector = when (feature.name) {
-                                            "files" -> Icons.Outlined.Folder
-                                            "camera" -> Icons.Outlined.CameraAlt
-                                            "wifi" -> Icons.Outlined.NetworkWifi
-                                            else -> Icons.Outlined.Settings
-                                        },
-                                        contentDescription = feature.title
-                                    )
-                                }
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = !settings && !targetSettings && !permissions,
+        drawerContent = {
+            ModalDrawerSheet {
+                Text("Scripts", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                features.forEachIndexed { index, feature ->
+                    NavigationDrawerItem(
+                        label = { Text(feature.title) },
+                        selected = pagerState.currentPage == index && !settings && !targetSettings,
+                        onClick = {
+                            pagerScope.launch {
+                                pagerState.animateScrollToPage(index)
+                                drawerState.close()
+                            }
+                        },
+                        icon = {
+                            Icon(
+                                when (feature.name) {
+                                    "files" -> Icons.Outlined.Folder
+                                    "camera" -> Icons.Outlined.CameraAlt
+                                    "wifi" -> Icons.Outlined.NetworkWifi
+                                    else -> Icons.Outlined.Settings
+                                },
+                                contentDescription = feature.title
                             )
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                Text("Targets", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp))
+                targets.forEach { target ->
+                    NavigationDrawerItem(
+                        label = { Text(target.requestTopic) },
+                        selected = selectedTopic == target.requestTopic,
+                        onClick = {
+                            service.callAttr("select_device", target.id)
+                            selectedDeviceId = target.id
+                            selectedTopic = target.requestTopic
+                            selectedDevice = target.name
+                            targetRemoteRoot = target.remoteRoot
+                            scope.launch { drawerState.close() }
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
+                NavigationDrawerItem(
+                    label = { Text("Add target") },
+                    selected = false,
+                    onClick = {
+                        editingDeviceId = null
+                        targetSettings = true
+                        scope.launch { drawerState.close() }
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+            }
+        }
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(selectedDevice)
+                            Text(onlineStatus, style = MaterialTheme.typography.labelSmall)
+                        }
+                    },
+                    actions = {
+                        if (!settings && !targetSettings && !permissions) {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Outlined.Menu, contentDescription = "Scripts and targets")
+                            }
+                            IconButton(onClick = {
+                                editingDeviceId = selectedDeviceId
+                                targetSettings = true
+                            }) {
+                                Icon(Icons.Outlined.Tune, contentDescription = "Target settings")
+                            }
+                        }
+                        if (!settings && !targetSettings && !permissions) {
+                            IconButton(onClick = { settings = true }) {
+                                Icon(Icons.Outlined.Settings, contentDescription = "App settings")
+                            }
                         }
                     }
-                    HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                        when (features[page].name) {
-                            "files" -> FilesPage()
-                            "camera" -> CameraPage()
-                            "wifi" -> WifiPage()
-                            else -> DynamicFeaturePage(features[page])
+                )
+            }
+        ) { padding ->
+            if (permissions) {
+                PermissionPage(onBack = { permissions = false })
+            } else if (targetSettings) {
+                TargetSettingsPage(
+                    modifier = Modifier.padding(padding),
+                    existingDeviceId = editingDeviceId,
+                    onBack = { targetSettings = false },
+                    onTargetCreated = { id ->
+                        selectedDeviceId = id
+                    }
+                )
+            } else if (settings) {
+                SettingsPage(
+                    modifier = Modifier.padding(padding),
+                    onBack = { settings = false },
+                    onPermissions = { permissions = true }
+                )
+            } else {
+                Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                    if (features.isEmpty()) {
+                        Text("No feature scripts found", modifier = Modifier.padding(16.dp))
+                    } else {
+                        val selectedPage = pagerState.currentPage.coerceIn(0, features.lastIndex)
+                        ScrollableTabRow(selectedTabIndex = selectedPage) {
+                            features.forEachIndexed { index, feature ->
+                                Tab(
+                                    selected = selectedPage == index,
+                                    onClick = { pagerScope.launch { pagerState.animateScrollToPage(index) } },
+                                    text = { Text(feature.title) },
+                                    icon = {
+                                        Icon(
+                                            imageVector = when (feature.name) {
+                                                "files" -> Icons.Outlined.Folder
+                                                "camera" -> Icons.Outlined.CameraAlt
+                                                "wifi" -> Icons.Outlined.NetworkWifi
+                                                else -> Icons.Outlined.Settings
+                                            },
+                                            contentDescription = feature.title
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                            when (features[page].name) {
+                                "files" -> FilesPage(targetRemoteRoot)
+                                "camera" -> CameraPage()
+                                "wifi" -> WifiPage()
+                                else -> DynamicFeaturePage(features[page])
+                            }
                         }
                     }
                 }
@@ -217,8 +395,8 @@ private fun ClientMqttScreen() {
 }
 
 @Composable
-private fun FilesPage() {
-    var root by remember { mutableStateOf("/data/data") }
+private fun FilesPage(initialRoot: String) {
+    var root by remember(initialRoot) { mutableStateOf(initialRoot) }
     var limit by remember { mutableStateOf("100") }
     var status by remember { mutableStateOf("Ready") }
     var entries by remember { mutableStateOf(listOf<RemoteFile>()) }
@@ -333,6 +511,7 @@ private fun FilesPage() {
 private fun CameraPage() {
     var facing by remember { mutableStateOf(0) }
     var status by remember { mutableStateOf("Ready") }
+    var preview by remember { mutableStateOf<ImageBitmap?>(null) }
     val service = remember { Python.getInstance().getModule("client_service") }
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -341,15 +520,33 @@ private fun CameraPage() {
             Button(onClick = { facing = 1 }) { Text("Front") }
             Button(onClick = {
                 status = "Capturing..."
+                preview = null
                 scope.launch {
-                    val result = withContext(Dispatchers.IO) {
-                        service.callAttr("call_feature", "camera", "capture", facing).toString()
+                    try {
+                        val raw = withContext(Dispatchers.IO) {
+                            service.callAttr("call_feature", "camera", "capture", facing).toString()
+                        }
+                        val result = JSONObject(raw)
+                        if (!result.optBoolean("ok")) error(result.optString("error", "capture failed"))
+                        val url = result.optString("url")
+                        if (url.isNotBlank()) {
+                            val encoded = withContext(Dispatchers.IO) {
+                                service.callAttr("download_transfer_base64", url).toString()
+                            }
+                            val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                            preview = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                        }
+                        status = result.toString(2)
+                    } catch (error: Exception) {
+                        status = "Capture failed: ${error.message}"
                     }
-                    status = result
                 }
             }) { Text("Capture") }
         }
         Text(status)
+        preview?.let { bitmap ->
+            Image(bitmap = bitmap, contentDescription = "Captured photo", modifier = Modifier.fillMaxWidth())
+        }
         Text("JPEG stays in memory on the target and is transferred outside MQTT.", style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -363,19 +560,13 @@ private fun WifiPage() {
         Button(onClick = {
             status = "Querying..."
             scope.launch {
-                status = withContext(Dispatchers.IO) {
+                val raw = withContext(Dispatchers.IO) {
                     service.callAttr("call_feature", "wifi", "info").toString()
                 }
+                status = runCatching { JSONObject(raw).toString(2) }.getOrDefault(raw)
             }
         }) { Text("Refresh Wi-Fi") }
         Text(status, style = MaterialTheme.typography.bodyMedium)
-    }
-}
-
-@Composable
-private fun LogsPage() {
-    LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
-        item { Text("No requests yet", style = MaterialTheme.typography.bodyMedium) }
     }
 }
 
@@ -405,33 +596,191 @@ private fun DynamicFeaturePage(feature: FeatureDescriptor) {
 }
 
 @Composable
+private fun TargetSettingsPage(
+    modifier: Modifier = Modifier,
+    existingDeviceId: String?,
+    onBack: () -> Unit,
+    onTargetCreated: (String) -> Unit
+) {
+    var deviceId by remember(existingDeviceId) { mutableStateOf(existingDeviceId.orEmpty()) }
+    var topic by remember(existingDeviceId) { mutableStateOf("") }
+    var remoteRoot by remember(existingDeviceId) { mutableStateOf("/data/data") }
+    var aliyunJson by remember(existingDeviceId) { mutableStateOf("{}") }
+    var privateKey by remember(existingDeviceId) { mutableStateOf("") }
+    var timeout by remember(existingDeviceId) { mutableStateOf("10") }
+    var allowNoServerKey by remember(existingDeviceId) { mutableStateOf(true) }
+    var loaded by remember(existingDeviceId) { mutableStateOf(existingDeviceId == null) }
+    var lastLocalEdit by remember(existingDeviceId) { mutableStateOf(0L) }
+    var status by remember { mutableStateOf("") }
+    val service = remember { Python.getInstance().getModule("client_service") }
+
+    LaunchedEffect(deviceId, existingDeviceId) {
+        val targetId = deviceId.ifBlank { existingDeviceId ?: return@LaunchedEffect }
+        while (true) {
+            runCatching {
+                val config = withContext(Dispatchers.IO) {
+                    JSONObject(service.callAttr("device_settings", targetId).toString())
+                }
+                if (deviceId.isBlank()) deviceId = config.optString("id", targetId)
+                if (System.currentTimeMillis() - lastLocalEdit >= 1_200L) {
+                    topic = config.optString("request_topic", "")
+                    remoteRoot = config.optString("remote_root", "/data/data")
+                    aliyunJson = if (config.has("aliyun_json_draft")) {
+                        config.optString("aliyun_json_draft")
+                    } else {
+                        val incomingAliyun = config.optJSONObject("aliyun") ?: JSONObject()
+                        val currentAliyun = runCatching { JSONObject(aliyunJson).toString() }.getOrNull()
+                        if (currentAliyun == incomingAliyun.toString()) aliyunJson else incomingAliyun.toString(2)
+                    }
+                    privateKey = config.optString("private_key", "")
+                    timeout = config.optString("timeout_draft", config.optString("timeout", "10"))
+                    allowNoServerKey = config.optBoolean("allow_no_server_pubkey_response", true)
+                    loaded = true
+                }
+            }.onFailure { status = "Unable to sync target settings: ${it.message}" }
+            delay(1_000)
+        }
+    }
+
+    LaunchedEffect(deviceId, topic, remoteRoot, aliyunJson, privateKey, timeout, allowNoServerKey, loaded) {
+        if (!loaded || topic.isBlank()) return@LaunchedEffect
+        delay(300)
+        val parsedAliyun = runCatching { JSONObject(aliyunJson) }.getOrNull()
+        val timeoutValue = timeout.toDoubleOrNull()?.takeIf { it > 0 }
+        val values = JSONObject()
+            .put("request_topic", topic.trim())
+            .put("remote_root", remoteRoot)
+            .put("private_key", privateKey)
+            .put("allow_no_server_pubkey_response", allowNoServerKey)
+        if (parsedAliyun != null) values.put("aliyun", parsedAliyun)
+        else values.put("aliyun_json_draft", aliyunJson)
+        if (timeoutValue != null) values.put("timeout", timeoutValue)
+        else values.put("timeout_draft", timeout)
+
+        status = "Saving..."
+        runCatching {
+            val saved = withContext(Dispatchers.IO) {
+                JSONObject(service.callAttr("update_device_settings", deviceId, values.toString()).toString())
+            }
+            val savedId = saved.optString("id")
+            if (deviceId.isBlank() && savedId.isNotBlank()) {
+                deviceId = savedId
+                onTargetCreated(savedId)
+            }
+            status = when {
+                parsedAliyun == null -> "Saved; Aliyun JSON is incomplete"
+                timeoutValue == null -> "Saved; timeout must be positive"
+                else -> "Saved to client_mqtt.json"
+            }
+        }.onFailure { status = "Save failed: ${it.message}" }
+    }
+
+    Column(
+        modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(if (existingDeviceId == null) "Add target" else "Target settings", style = MaterialTheme.typography.headlineSmall)
+            Button(onClick = onBack) { Text("Done") }
+        }
+        OutlinedTextField(
+            topic,
+            { topic = it; lastLocalEdit = System.currentTimeMillis() },
+            Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Request topic") }
+        )
+        OutlinedTextField(
+            remoteRoot,
+            { remoteRoot = it; lastLocalEdit = System.currentTimeMillis() },
+            Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Allowed remote root") }
+        )
+        OutlinedTextField(
+            aliyunJson,
+            { aliyunJson = it; lastLocalEdit = System.currentTimeMillis() },
+            Modifier.fillMaxWidth(),
+            minLines = 6,
+            label = { Text("Aliyun configuration JSON") }
+        )
+        OutlinedTextField(
+            privateKey,
+            { privateKey = it; lastLocalEdit = System.currentTimeMillis() },
+            Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Client private key") }
+        )
+        OutlinedTextField(
+            timeout,
+            { timeout = it.filter { char -> char.isDigit() || char == '.' }; lastLocalEdit = System.currentTimeMillis() },
+            Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Timeout in seconds") }
+        )
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("Allow response without server signature")
+            Switch(
+                checked = allowNoServerKey,
+                onCheckedChange = { allowNoServerKey = it; lastLocalEdit = System.currentTimeMillis() }
+            )
+        }
+        Text(status, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
 private fun SettingsPage(
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
-    onDeviceChanged: (String) -> Unit,
     onPermissions: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var topic by remember { mutableStateOf("sys/device/request") }
-    var remoteRoot by remember { mutableStateOf("/data/data") }
-    var domain by remember { mutableStateOf("") }
-    var token by remember { mutableStateOf("") }
     var useExternal by remember {
         mutableStateOf(context.getSharedPreferences("client_mqtt", Context.MODE_PRIVATE).getBoolean("use_external_scripts", false))
     }
     var status by remember { mutableStateOf("") }
+    var downloadStatus by remember { mutableStateOf("") }
+    var downloadLogs by remember { mutableStateOf(listOf<String>()) }
+    var downloading by remember { mutableStateOf(false) }
+    var scriptRevision by remember { mutableStateOf(0) }
     val externalAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
     val scriptRoot = if (useExternal && externalAllowed) "/sdcard/apm/client_mqtt" else "${context.filesDir}/client_mqtt"
+    val featureDirectory = File(scriptRoot, "py_updates")
+    val missingFeatures = remember(scriptRoot, scriptRevision) {
+        listOf("feature_files.py", "feature_camera.py", "feature_wifi.py")
+            .filterNot { File(featureDirectory, it).isFile }
+    }
     val service = remember { Python.getInstance().getModule("client_service") }
-    Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    val scope = rememberCoroutineScope()
+
+    suspend fun refreshDownloadLogs() {
+        val raw = withContext(Dispatchers.IO) { service.callAttr("operation_logs").toString() }
+        val array = org.json.JSONArray(raw)
+        downloadLogs = buildList {
+            for (index in 0 until array.length()) add(array.optString(index))
+        }
+    }
+
+    LaunchedEffect(downloading) {
+        while (downloading) {
+            runCatching { refreshDownloadLogs() }
+            delay(400)
+        }
+    }
+
+    Column(
+        modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Settings", style = MaterialTheme.typography.headlineSmall)
+            Text("App settings", style = MaterialTheme.typography.headlineSmall)
             Button(onClick = onBack) { Text("Done") }
         }
-        OutlinedTextField(topic, { topic = it; onDeviceChanged(it.substringAfterLast('/')) }, Modifier.fillMaxWidth(), label = { Text("Request topic") })
-        OutlinedTextField(remoteRoot, { remoteRoot = it }, Modifier.fillMaxWidth(), label = { Text("Allowed remote root") })
-        OutlinedTextField(domain, { domain = it }, Modifier.fillMaxWidth(), label = { Text("Aliyun domain") })
-        OutlinedTextField(token, { token = it }, Modifier.fillMaxWidth(), label = { Text("Aliyun token") })
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Column(Modifier.weight(1f)) {
                 Text("Script directory", style = MaterialTheme.typography.labelLarge)
@@ -444,18 +793,64 @@ private fun SettingsPage(
                 status = "Restart the app to apply script directory"
             })
         }
+        if (useExternal && externalAllowed) {
+            HorizontalDivider()
+            Text("External feature scripts", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (missingFeatures.isEmpty()) "All three feature files are present"
+                else "${missingFeatures.size} feature files are missing",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Button(enabled = !downloading, onClick = {
+                downloading = true
+                downloadStatus = "Starting Python downloader..."
+                downloadLogs = emptyList()
+                scope.launch {
+                    try {
+                        val response = withContext(Dispatchers.IO) {
+                            service.callAttr("install_builtin_features", scriptRoot, 4, 15).toString()
+                        }
+                        val result = JSONObject(response)
+                        val ready = result.optJSONArray("results")?.length() ?: 0
+                        downloadStatus = if (result.optBoolean("ok")) {
+                            "$ready feature scripts ready. Restart if you just changed the script directory."
+                        } else {
+                            "Some scripts failed. Check the download log and retry."
+                        }
+                    } catch (error: Exception) {
+                        downloadStatus = "Download failed: ${error.message}"
+                    } finally {
+                        runCatching { refreshDownloadLogs() }
+                        downloading = false
+                        scriptRevision++
+                    }
+                }
+            }) {
+                Text(if (downloading) "Downloading scripts..." else "Download missing feature scripts")
+            }
+            if (downloadStatus.isNotBlank()) Text(downloadStatus, style = MaterialTheme.typography.bodySmall)
+            Text("Download log", style = MaterialTheme.typography.labelLarge)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp, max = 180.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .verticalScroll(rememberScrollState())
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (downloadLogs.isEmpty()) {
+                    Text("No download activity", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    downloadLogs.forEach { line -> Text(line, style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+        }
+        if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.bodySmall)
         Button(onClick = onPermissions) {
             Icon(Icons.TwoTone.Security, contentDescription = null)
             Text("All Android permissions")
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                service.callAttr("update_settings", "{\"aliyun\":{\"domain\":${JSONObject.quote(domain)},\"token\":${JSONObject.quote(token)}},\"remote_root\":${JSONObject.quote(remoteRoot)}}")
-                status = "Saved to $scriptRoot/client_mqtt.json"
-            }) { Text("Save settings") }
-            Text(status, style = MaterialTheme.typography.bodySmall)
-        }
-        Text("Private keys and tokens are stored in the selected script directory and never logged.", style = MaterialTheme.typography.bodySmall)
     }
 }
 

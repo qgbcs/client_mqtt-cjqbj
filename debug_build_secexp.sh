@@ -5,10 +5,6 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 WORKSPACE_DIR="$(dirname "$PROJECT_DIR")"
 
-# ============================================================
-# 新增环境隔离：强制让 Gradle 和 Android 工具依赖外层工作区目录
-# 显式 mkdir -p 预先创建目录，防止 AGP 的 AndroidDirectoryCreator 崩溃。
-# ============================================================
 export GRADLE_USER_HOME="$WORKSPACE_DIR/.gradle"
 export ANDROID_USER_HOME="$WORKSPACE_DIR/.android"
 
@@ -22,7 +18,7 @@ PROJECT_NAME="${PROJECT_DIR##*/}"
 
 SECEXP="${SECEXP:-1}"
 APPLICATION_ID="${APPLICATION_ID:-com.qgb.${PROJECT_NAME}}"
-VERSION_CODE="${VERSION_CODE:-20260916}"
+VERSION_CODE="${VERSION_CODE:-1}"
 VERSION_NAME="${VERSION_NAME:-${VERSION_CODE}SECEXP=${SECEXP}长度17混合}"
 
 APP_NAME="${PROJECT_NAME}"

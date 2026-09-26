@@ -1,5 +1,8 @@
 # Protocol
 
+## Target selection and setup
+The selected target record determines the MQTT `request_topic` and connection options for each RPC. Before the submitted feature code runs, the client prepends a short Python setup block which merges that target's Aliyun JSON object into `sys._qgb_dict["aliyun_git"]`. This does not add fields to the MQTT request envelope; it initializes the target interpreter for the existing code payload. Do not log the configuration because it may contain credentials.
+
 ## Browse request
 The generated target code receives:
 
@@ -12,6 +15,9 @@ The result must be JSON with `ok`, `root`, `items`, `has_more`, and `next_offset
 
 ## Transfer result
 A file transfer RPC returns only short metadata: `ok`, `url`, `name`, `size`, `content_type`, and optional `error`. The JPEG or file bytes never appear in the MQTT response.
+
+## Wi-Fi result
+The Wi-Fi feature returns JSON metadata under `wifi`, including `ssid`, `bssid`, `rssi`, `link_speed`, `frequency`, `ip`, and `mac`. The UI renders this JSON; it does not depend on Python repr formatting.
 
 ## Photo result
 Photo RPC returns the same transfer metadata plus camera facing and capture duration. The target must convert the Java callback buffer to Python `bytes`, upload it directly, and release the camera in `finally` without creating a photo file.

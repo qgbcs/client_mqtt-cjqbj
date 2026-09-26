@@ -1,23 +1,21 @@
 # Build
 
-Run from the `client_mqtt/` directory:
+在项目根目录运行：
 
 ```sh
 ./debug_build_secexp.sh
 ```
 
-The script synchronizes `MULTI_MQTT_SOURCE` into `app/src/main/python/multi_mqtt`, verifies the copy, builds a debug APK, normalizes the archive, signs it, and writes the result under `out/debug-secexp/`. The default source is the sibling `../multi_mqtt` directory.
+脚本从 `.gitmodules` 读取 MQTT 源目录并同步到 `app/src/main/python/multi_mqtt/`，查找 Android SDK，构建 debug APK，规范化归档后使用 secexp 签名。默认输出目录为 `out/`，默认产物为 `out/com.qgb.client-20260916-arm64-v8a.apk`。
 
-Useful overrides:
+当前脚本默认值：
 
-- `APPLICATION_ID=com.qgb.clientmqtt`
-- `VERSION_CODE=...`
-- `VERSION_NAME=...`
-- `APP_NAME='Client MQTT'`
-- `APK_BASENAME=ClientMqtt`
+- `APPLICATION_ID=com.qgb.client`
+- `VERSION_CODE=20260916`
 - `BUILD_ABIS=arm64-v8a`
 - `SECEXP=1`
-- `ANDROID_HOME=/path/to/sdk`
-- `MULTI_MQTT_SOURCE=/path/to/multi_mqtt`
+- `OUT_DIR=$PROJECT_DIR/out`
 
-The Android SDK must provide platform 36 and a working build-tools `aapt`, `apksigner`, and Gradle wrapper environment. Chaquopy is configured for Python 3.12 because that interpreter is available in the development container; change the version only when the matching local interpreter is installed.
+脚本会清除 `APPLICATION_ID`、`VERSION_CODE`、`VERSION_NAME`、`APP_NAME` 和 `BUILD_ABIS` 的继承环境值，因此这些值不能通过环境变量覆盖。可用的常见环境设置包括 `SECEXP`、`OUT_DIR` 和 `ANDROID_HOME`。SDK 需要 Android 36 平台及可用的 `aapt`、`apksigner` 和 Gradle 环境。
+
+Chaquopy 使用 Python 3.12；只有在本地具备匹配解释器时才调整版本。构建同步会覆盖生成目录中的 MQTT 副本，不要直接编辑该目录。
