@@ -2,11 +2,12 @@
 
 ## Remaining
 - Install the latest APK and verify left-edge drawer gestures, script selection, and target switching on Android.
+- Install the import-fix APK on the reported device and confirm Wi-Fi RPC no longer crashes; the exact host-side `2**128` request succeeds, but ADB is unavailable in the container.
 - Run device tests for bidirectional target settings sync, first-use external script download and retry log on the target network, two responders, remote scan pagination, file/Aliyun transfer, both cameras, permission flows, external storage, and runtime feature installation.
 
 ## Completed
 - Python service and structured feature dispatch.
-- Per-topic request routing, remote-root settings, and Aliyun JSON configuration.
+- Per-topic request routing and remote-root settings, plus one shared Aliyun JSON configuration.
 - Stable per-target IDs, automatic form-to-file persistence, external-file polling, and private-key/timeout/signature-fallback controls.
 - Bounded recursive scan with path and symlink protections.
 - Target-side file/photo upload and client-side download/preview flow.
@@ -17,3 +18,4 @@
 - Camera RPC generation and capture logic centralized in `feature_camera.py`.
 - Wi-Fi query generation and files scan/upload code generation owned by their respective feature modules.
 - Compose JSON rendering and camera photo download/preview bridge.
+- Catchable Python feature failures, including `SystemExit`, reported as structured UI errors instead of escaping into the Activity.

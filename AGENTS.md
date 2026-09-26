@@ -12,7 +12,7 @@
 - 文件和照片字节通过目标端 `aliyun_git` 上传，再由客户端通过 HTTP 下载。
 - 拍照数据必须保留在内存中，不得在目标设备写入照片文件。
 - 不要输出 Aliyun token、私钥或 RPC 生成的密钥。
-- 每个 `request_topic` 对应带稳定 ID 的独立目标配置；topic、远程根目录、Aliyun JSON、私钥、超时和验签回退选项保存在脚本根目录的 `client_mqtt.json`。目标页修改后自动保存，并轮询感知外部文件变更；Android 本机应用设置仍单独管理。
+- 每个 `request_topic` 对应带稳定 ID 的独立目标配置；topic、远程根目录、私钥、超时和验签回退选项保存在脚本根目录的 `client_mqtt.json`。Aliyun 是公共配置，保存在同一文件的顶层，不得放进目标记录。目标页和公共 Aliyun 设置页修改后自动保存，并轮询感知外部文件变更。
 - 拍照目标端代码和 `capture` 入口集中在 `feature_camera.py`；Compose 页面只负责选择相机并调用 feature。
 - 首次使用外部脚本目录时，可通过设置页的 Python 下载器安装缺失的 files、camera、wifi 脚本。下载要有超时、备用地址和重试，并在界面日志区显示逐步结果。
 
@@ -21,6 +21,7 @@
 - 新增运行时脚本遵循 `FEATURE_DEVELOPMENT.md`；不要把新的脚本专属 Compose 页面继续堆入主 Activity。
 - 每个 feature 自己负责领域代码生成和 RPC 动作；`client_service` 只提供通用 RPC、JSON、配置和传输桥接，不新增 `build_wifi_code`、`scan_remote` 这类 feature 专属 helper。
 - Feature 返回结构化 JSON；普通信息由 Compose 展示，照片等媒体通过 feature 返回的短 URL/元数据交给 Compose 下载和预览，不能把媒体字节经 MQTT 返回。
+- `client_service.call_feature` 必须捕获 feature 的 Python 异常并返回结构化错误，不能让第三方脚本异常越过 Chaquopy 边界关闭 Activity；原生/JVM 崩溃不属于此保护范围。
 - RPC 结果使用明确 JSON，不要为新协议依赖 Python 的 repr 输出。
 - 递归扫描必须限制分页大小并返回 `has_more`、`next_offset`；拒绝路径穿越、符号链接逃逸和无界递归。
 - 扩大改动前先添加或更新针对性测试。

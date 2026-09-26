@@ -1,7 +1,7 @@
 # Protocol
 
 ## Target selection and setup
-The selected target record determines the MQTT `request_topic` and connection options for each RPC. Before the submitted feature code runs, the client prepends a short Python setup block which merges that target's Aliyun JSON object into `sys._qgb_dict["aliyun_git"]`. This does not add fields to the MQTT request envelope; it initializes the target interpreter for the existing code payload. Do not log the configuration because it may contain credentials.
+The selected target record determines the MQTT `request_topic` and connection options for each RPC. Shared Aliyun configuration is stored once at the root of `client_mqtt.json`. Before submitted feature code runs, the client prepends a short Python setup block which merges this global Aliyun JSON object into `sys._qgb_dict["aliyun_git"]`. This does not add fields to the MQTT request envelope; it initializes the target interpreter for the existing code payload. Do not log the configuration because it may contain credentials.
 
 ## Browse request
 The generated target code receives:
@@ -23,7 +23,7 @@ The Wi-Fi feature returns JSON metadata under `wifi`, including `ssid`, `bssid`,
 Photo RPC returns the same transfer metadata plus camera facing and capture duration. The target must convert the Java callback buffer to Python `bytes`, upload it directly, and release the camera in `finally` without creating a photo file.
 
 ## Errors
-Use structured error fields and preserve the target traceback in the log channel only. Redact tokens, private keys, and authorization headers before forwarding logs to Android.
+RPC responses use structured error fields. The client feature dispatcher returns `ok: false`, `feature`, `action`, and `error` when Python feature code raises, including `SystemExit`; do not forward a traceback, token, private key, or authorization header to the UI. Native/JVM crashes and forced process termination cannot be recovered by the Python exception boundary.
 
 ## Hot-updatable features
 Feature modules use the names `feature_files`, `feature_camera`, and `feature_wifi`. The stable dispatcher calls `bootstrap.call_feature(feature, action, *args)`. Runtime updates must be `feature_*.py` files written atomically into the app-private `files/py_updates/` directory. Optional SHA-256 verification is supported by `bootstrap.install_feature`; unsigned or path-traversal filenames are rejected.

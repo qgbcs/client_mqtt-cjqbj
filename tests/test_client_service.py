@@ -16,6 +16,92 @@ import feature_wifi
 
 
 class ClientServiceTests(unittest.TestCase):
+    def test_mqtt_loader_uses_flat_modules_not_package_submodules(self):
+        previous_file = client_service.__file__
+        previous_path = list(sys.path)
+        previous_modules = {
+            name: module for name, module in sys.modules.items()
+            if name == "multi_mqtt" or name.startswith("multi_mqtt.") or name == "client_mqtt"
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            module_dir = Path(directory) / "multi_mqtt"
+            module_dir.mkdir()
+            (module_dir / "multi_mqtt.py").write_text("class MultiMQTTManager: pass\n", encoding="utf-8")
+            (module_dir / "client_mqtt.py").write_text(
+                "from multi_mqtt import MultiMQTTManager\ndef rpc(*args, **kwargs): return {'ok': True}\n",
+                encoding="utf-8",
+            )
+            try:
+                client_service.__file__ = str(Path(directory) / "client_service.py")
+                for name in tuple(sys.modules):
+                    if name == "multi_mqtt" or name.startswith("multi_mqtt.") or name == "client_mqtt":
+                        sys.modules.pop(name, None)
+
+                module = client_service._mqtt_client_module()
+
+                self.assertEqual(module.__name__, "client_mqtt")
+                self.assertEqual(Path(module.__file__), module_dir / "client_mqtt.py")
+                self.assertTrue(module.rpc()["ok"])
+            finally:
+                client_service.__file__ = previous_file
+                sys.path[:] = previous_path
+                for name in tuple(sys.modules):
+                    if name == "multi_mqtt" or name.startswith("multi_mqtt.") or name == "client_mqtt":
+                        sys.modules.pop(name, None)
+                sys.modules.update(previous_modules)
+
+    def test_broken_runtime_feature_returns_json_instead_of_raising(self):
+        import bootstrap
+
+        previous_update_dir = bootstrap._UPDATE_DIR
+        previous_path = list(sys.path)
+        previous_module = sys.modules.pop("feature_broken", None)
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                bootstrap.init_env(directory)
+                Path(directory, "feature_broken.py").write_text(
+                    "FEATURE = {'name': 'broken'}\ndef run():\n    raise RuntimeError('plugin failed')\n",
+                    encoding="utf-8",
+                )
+
+                result = json.loads(client_service.call_feature("broken", "run"))
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["feature"], "broken")
+                self.assertEqual(result["error"], "RuntimeError: plugin failed")
+
+                Path(directory, "feature_broken.py").write_text(
+                    "FEATURE = {'name': 'broken'}\ndef run():\n    raise SystemExit('plugin exit')\n",
+                    encoding="utf-8",
+                )
+                result = json.loads(client_service.call_feature("broken", "run"))
+                self.assertEqual(result["error"], "SystemExit: plugin exit")
+            finally:
+                bootstrap._UPDATE_DIR = previous_update_dir
+                sys.path[:] = previous_path
+                sys.modules.pop("feature_broken", None)
+                if previous_module is not None:
+                    sys.modules["feature_broken"] = previous_module
+
+    def test_rpc_passes_private_key_expression_to_mqtt_normalizer(self):
+        previous_state = client_service._STATE.copy()
+        with tempfile.TemporaryDirectory() as files_dir:
+            try:
+                client_service.initialize(files_dir)
+                client_service.update_device_settings("sys/device/request", {
+                    "request_topic": "sys/device/key-test",
+                    "private_key": "2**64",
+                })
+                mqtt_module = mock.Mock()
+                mqtt_module.rpc.return_value = {"ok": True, "r": "{}"}
+                with mock.patch.object(client_service, "_mqtt_client_module", return_value=mqtt_module):
+                    client_service.rpc("r = {}")
+
+                self.assertEqual(mqtt_module.rpc.call_args.kwargs["client_private_key_bytes"], "2**64")
+            finally:
+                client_service._STATE.clear()
+                client_service._STATE.update(previous_state)
+
     def test_scan_code_is_bounded_and_json_based(self):
         code = feature_files.build_scan_code("/data/data", offset=10, limit=3)
         ast.parse(code)
@@ -55,6 +141,15 @@ class ClientServiceTests(unittest.TestCase):
             result = json.loads(feature_wifi.info())
         self.assertEqual(result["wifi"]["ip"], "192.168.1.11")
 
+        timeout = {"ok": False, "error": "RPC timeout"}
+        with mock.patch.object(client_service, "rpc", return_value=timeout):
+            result = json.loads(feature_wifi.info())
+        self.assertEqual(result, timeout)
+
+    def test_parse_json_result_preserves_structured_rpc_errors(self):
+        response = {"ok": False, "error": "RPC timeout", "elapsed_ms": 5000}
+        self.assertEqual(client_service.parse_json_result(response), response)
+
     def test_files_feature_actions_use_shared_rpc_and_return_json(self):
         page = {"ok": True, "items": [], "has_more": False, "next_offset": 0}
         with mock.patch.object(client_service, "rpc", return_value={"r": json.dumps(page)}) as rpc_call:
@@ -83,13 +178,12 @@ class ClientServiceTests(unittest.TestCase):
                 client_service.update_device_settings("sys/device/request", {
                     "request_topic": "sys/device/one",
                     "remote_root": "/data/one",
-                    "aliyun": {"bucket": "one"},
                 })
                 client_service.update_device_settings("", {
                     "request_topic": "sys/device/two",
                     "remote_root": "/data/two",
-                    "aliyun": {"bucket": "two"},
                 })
+                client_service.update_aliyun_settings({"aliyun": {"bucket": "shared"}})
 
                 client_service.select_device("sys/device/one")
                 first = json.loads(client_service.device_settings())
@@ -97,9 +191,10 @@ class ClientServiceTests(unittest.TestCase):
                 second = json.loads(client_service.device_settings())
 
                 self.assertEqual(first["remote_root"], "/data/one")
-                self.assertEqual(first["aliyun"], {"bucket": "one"})
                 self.assertEqual(second["remote_root"], "/data/two")
-                self.assertEqual(second["aliyun"], {"bucket": "two"})
+                self.assertNotIn("aliyun", first)
+                self.assertNotIn("aliyun", second)
+                self.assertEqual(json.loads(client_service.aliyun_settings())["aliyun"], {"bucket": "shared"})
             finally:
                 client_service._STATE.clear()
                 client_service._STATE.update(previous_state)
@@ -137,24 +232,37 @@ class ClientServiceTests(unittest.TestCase):
                 client_service._STATE.clear()
                 client_service._STATE.update(previous_state)
 
-    def test_incomplete_aliyun_draft_keeps_last_valid_config(self):
+    def test_incomplete_aliyun_draft_keeps_last_valid_global_config(self):
         previous_state = client_service._STATE.copy()
         with tempfile.TemporaryDirectory() as files_dir:
             try:
                 client_service.initialize(files_dir)
-                created = json.loads(client_service.update_device_settings("sys/device/request", {
-                    "request_topic": "sys/device/one",
-                    "remote_root": "/data/one",
-                    "aliyun": {"bucket": "valid"},
-                }))
-                saved = json.loads(client_service.update_device_settings(created["id"], {
-                    "request_topic": "sys/device/one",
-                    "remote_root": "/data/one",
-                    "aliyun_json_draft": "{",
-                }))
+                client_service.update_aliyun_settings({"aliyun": {"bucket": "valid"}})
+                saved = json.loads(client_service.update_aliyun_settings({"aliyun_json_draft": "{"}))
 
                 self.assertEqual(saved["aliyun"], {"bucket": "valid"})
                 self.assertEqual(saved["aliyun_json_draft"], "{")
+            finally:
+                client_service._STATE.clear()
+                client_service._STATE.update(previous_state)
+
+    def test_initialize_migrates_legacy_per_topic_aliyun_to_shared_setting(self):
+        previous_state = client_service._STATE.copy()
+        with tempfile.TemporaryDirectory() as files_dir:
+            try:
+                path = Path(files_dir) / "client_mqtt.json"
+                path.write_text(json.dumps({
+                    "devices": [{
+                        "request_topic": "sys/device/one",
+                        "aliyun": {"bucket": "legacy"},
+                    }]
+                }), encoding="utf-8")
+
+                client_service.initialize(files_dir)
+                config = client_service.load_config()
+
+                self.assertEqual(config["aliyun"], {"bucket": "legacy"})
+                self.assertNotIn("aliyun", config["devices"][0])
             finally:
                 client_service._STATE.clear()
                 client_service._STATE.update(previous_state)

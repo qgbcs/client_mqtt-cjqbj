@@ -11,8 +11,11 @@ chaquopy {
     defaultConfig {
         version = "3.12"
         pip {
-            install("paho-mqtt==2.1.0")
-            install("ecdsa==0.19.1")
+            install("pip")
+            install("wheel")
+            install("setuptools")
+            install("paho-mqtt")
+            install("ecdsa")
             install("requests")
         }
     }

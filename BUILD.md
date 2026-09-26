@@ -6,12 +6,12 @@
 ./debug_build_secexp.sh
 ```
 
-脚本从 `.gitmodules` 读取 MQTT 源目录并同步到 `app/src/main/python/multi_mqtt/`，查找 Android SDK，构建 debug APK，规范化归档后使用 secexp 签名。默认输出目录为 `out/`，默认产物为 `out/com.qgb.client-20260916-arm64-v8a.apk`。
+脚本从 `.gitmodules` 读取 MQTT 源目录并同步到 `app/src/main/python/multi_mqtt/`，查找 Android SDK，构建 debug APK，规范化归档后使用 secexp 签名。默认输出目录为 `out/`，当前默认产物为 `out/com.qgb.client-1-arm64-v8a.apk`。
 
 当前脚本默认值：
 
 - `APPLICATION_ID=com.qgb.client`
-- `VERSION_CODE=20260916`
+- `VERSION_CODE=1`
 - `BUILD_ABIS=arm64-v8a`
 - `SECEXP=1`
 - `OUT_DIR=$PROJECT_DIR/out`

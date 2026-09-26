@@ -27,7 +27,6 @@ _DEFAULT_DEVICE = {
     "allow_no_server_pubkey_response": True,
     "timeout": 10,
     "remote_root": "/data/data",
-    "aliyun": {},
 }
 _CONFIG_NAME = "client_mqtt.json"
 _BUILTIN_FEATURE_SOURCES = {
@@ -49,29 +48,48 @@ _BUILTIN_FEATURE_SOURCES = {
 def call_feature(feature, action="run", *args):
     """Dispatch through the stable bootstrap so feature modules can be replaced."""
     import bootstrap
-    return bootstrap.call_feature(feature, action, *args)
+    try:
+        result = bootstrap.call_feature(feature, action, *args)
+    except BaseException as error:
+        return json.dumps({
+            "ok": False,
+            "feature": str(feature),
+            "action": str(action),
+            "error": f"{type(error).__name__}: {error}",
+        }, ensure_ascii=False)
+    if isinstance(result, str):
+        return result
+    try:
+        return json.dumps(result, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps({"ok": True, "result": str(result)}, ensure_ascii=False)
 
 
 def _mqtt_client_module():
     module_dir = os.path.join(os.path.dirname(__file__), "multi_mqtt")
-    source_file = os.path.join(module_dir, "multi_mqtt.py")
+    package_source = os.path.join(module_dir, "multi_mqtt.py")
+    client_source = os.path.join(module_dir, "client_mqtt.py")
     if module_dir not in sys.path:
         sys.path.insert(0, module_dir)
-    package = sys.modules.get("multi_mqtt")
-    package_file = os.path.abspath(str(getattr(package, "__file__", "")))
-    if package_file != os.path.abspath(source_file) or not hasattr(package, "MultiMQTTManager"):
+    mqtt_module = sys.modules.get("multi_mqtt")
+    mqtt_file = os.path.abspath(str(getattr(mqtt_module, "__file__", "")))
+    if mqtt_file != os.path.abspath(package_source) or not hasattr(mqtt_module, "MultiMQTTManager"):
         for name in tuple(sys.modules):
             if name == "multi_mqtt" or name.startswith("multi_mqtt."):
                 sys.modules.pop(name, None)
-        spec = importlib.util.spec_from_file_location(
-            "multi_mqtt", source_file, submodule_search_locations=[module_dir]
-        )
+        spec = importlib.util.spec_from_file_location("multi_mqtt", package_source)
         if spec is None or spec.loader is None:
-            raise ImportError(f"Unable to load MQTT library from {source_file}")
-        package = importlib.util.module_from_spec(spec)
-        sys.modules["multi_mqtt"] = package
-        spec.loader.exec_module(package)
-    return importlib.import_module("multi_mqtt.client_mqtt")
+            raise ImportError(f"Unable to load MQTT module from {package_source}")
+        mqtt_module = importlib.util.module_from_spec(spec)
+        sys.modules["multi_mqtt"] = mqtt_module
+        spec.loader.exec_module(mqtt_module)
+
+    client_module = sys.modules.get("client_mqtt")
+    client_file = os.path.abspath(str(getattr(client_module, "__file__", "")))
+    if client_file != os.path.abspath(client_source) or not callable(getattr(client_module, "rpc", None)):
+        sys.modules.pop("client_mqtt", None)
+        return importlib.import_module("client_mqtt")
+    return client_module
 
 
 def feature_catalog():
@@ -158,13 +176,28 @@ def initialize(files_dir):
         devices = [item for item in config.get("devices", []) if isinstance(item, dict)]
         if not devices:
             devices = [_DEFAULT_DEVICE.copy()]
+        aliyun = config.get("aliyun")
+        if not isinstance(aliyun, dict):
+            aliyun = next((
+                device.get("aliyun") for device in devices
+                if isinstance(device.get("aliyun"), dict) and device.get("aliyun")
+            ), {})
+        aliyun_draft = config.get("aliyun_json_draft")
+        if not isinstance(aliyun_draft, str):
+            aliyun_draft = next((
+                device.get("aliyun_json_draft") for device in devices
+                if isinstance(device.get("aliyun_json_draft"), str)
+            ), None)
         for device in devices:
             device.setdefault("id", uuid.uuid4().hex)
             device.setdefault("remote_root", config.get("remote_root", "/data/data"))
-            device.setdefault("aliyun", config.get("aliyun", {}))
+            device.pop("aliyun", None)
+            device.pop("aliyun_json_draft", None)
         config["devices"] = devices
+        config["aliyun"] = aliyun
+        if aliyun_draft is not None:
+            config["aliyun_json_draft"] = aliyun_draft
         config.pop("remote_root", None)
-        config.pop("aliyun", None)
         save_config(config)
         _STATE["selected_device_id"] = devices[0]["id"]
         _STATE["selected_topic"] = devices[0].get("request_topic", _DEFAULT_DEVICE["request_topic"])
@@ -181,6 +214,36 @@ def update_settings(values):
         return json.dumps(config, ensure_ascii=False)
 
 
+def aliyun_settings():
+    config = load_config()
+    return json.dumps({
+        "aliyun": config.get("aliyun") if isinstance(config.get("aliyun"), dict) else {},
+        "aliyun_json_draft": config.get("aliyun_json_draft"),
+    }, ensure_ascii=False)
+
+
+def update_aliyun_settings(values):
+    if isinstance(values, str):
+        values = json.loads(values)
+    if not isinstance(values, dict):
+        raise ValueError("Aliyun settings must be a JSON object")
+    config = load_config()
+    aliyun = values.get("aliyun")
+    draft = values.get("aliyun_json_draft")
+    if aliyun is not None:
+        if not isinstance(aliyun, dict):
+            raise ValueError("aliyun must be a JSON object")
+        config["aliyun"] = aliyun
+    if draft is None:
+        config.pop("aliyun_json_draft", None)
+    elif isinstance(draft, str):
+        config["aliyun_json_draft"] = draft
+    else:
+        raise ValueError("aliyun_json_draft must be a string")
+    save_config(config)
+    return aliyun_settings()
+
+
 def device_catalog():
     config = load_config()
     devices = config.get("devices") or [_DEFAULT_DEVICE.copy()]
@@ -190,7 +253,6 @@ def device_catalog():
             device["id"] = uuid.uuid4().hex
             changed = True
         device.setdefault("remote_root", config.get("remote_root", "/data/data"))
-        device.setdefault("aliyun", config.get("aliyun", {}))
     if changed:
         config["devices"] = devices
         save_config(config)
@@ -218,12 +280,8 @@ def update_device_settings(existing_device, values):
     request_topic = str(values.get("request_topic", "")).strip()
     if not request_topic:
         raise ValueError("request_topic is required")
-    aliyun = values.get("aliyun", {})
-    if not isinstance(aliyun, dict):
-        raise ValueError("aliyun must be a JSON object")
-    aliyun_draft = values.pop("aliyun_json_draft", None)
-    if aliyun_draft is not None and not isinstance(aliyun_draft, str):
-        raise ValueError("aliyun_json_draft must be a string")
+    values.pop("aliyun", None)
+    values.pop("aliyun_json_draft", None)
     timeout_draft = values.pop("timeout_draft", None)
     if timeout_draft is not None and not isinstance(timeout_draft, str):
         raise ValueError("timeout_draft must be a string")
@@ -244,14 +302,6 @@ def update_device_settings(existing_device, values):
         selected["request_topic"] = request_topic
         selected["name"] = str(values.get("name") or request_topic.rsplit("/", 1)[-1])
         selected["remote_root"] = str(values.get("remote_root", "/data/data"))
-        if "aliyun" in values:
-            selected["aliyun"] = aliyun
-        else:
-            selected.setdefault("aliyun", {})
-        if aliyun_draft is None:
-            selected.pop("aliyun_json_draft", None)
-        else:
-            selected["aliyun_json_draft"] = aliyun_draft
         if timeout_draft is None:
             selected.pop("timeout_draft", None)
         else:
@@ -315,7 +365,7 @@ def rpc(code, device=None):
     client_mqtt = _mqtt_client_module()
     selected = _device_config(device)
     private_key = selected.get("private_key") or None
-    aliyun = json.dumps(selected.get("aliyun") or {}, ensure_ascii=False)
+    aliyun = json.dumps(load_config().get("aliyun") or {}, ensure_ascii=False)
     code = (
         "import sys\n"
         f"sys.__dict__.setdefault('_qgb_dict', {{}}).setdefault('aliyun_git', {{}}).update({aliyun})\n"
@@ -326,7 +376,7 @@ def rpc(code, device=None):
         code,
         request_topic=selected["request_topic"],
         timeout=float(selected.get("timeout", 10)),
-        client_private_key_bytes=int(private_key, 0) if private_key else None,
+        client_private_key_bytes=private_key,
         allow_no_server_pubkey_response=bool(selected.get("allow_no_server_pubkey_response", False)),
     )
     if response is None:
@@ -348,7 +398,7 @@ def _set_aliyun_config(config):
 
 def download_transfer(url, config=None, save_to=None):
     """Download a short transfer URL outside MQTT, returning bytes or a local path."""
-    _set_aliyun_config(config)
+    _set_aliyun_config(config if config is not None else load_config().get("aliyun", {}))
     aliyun_git = importlib.import_module("aliyun_git")
     data = aliyun_git.download(url, save_to=save_to, max_show_bytes_size=0)
     return {"ok": True, "path": data if save_to else None, "size": os.path.getsize(data) if save_to else len(data)}
@@ -356,7 +406,7 @@ def download_transfer(url, config=None, save_to=None):
 
 def download_transfer_base64(url, config=None):
     """Download an image/file into memory for the Android bridge, never MQTT."""
-    _set_aliyun_config(config or _device_config().get("aliyun", {}))
+    _set_aliyun_config(config if config is not None else load_config().get("aliyun", {}))
     aliyun_git = importlib.import_module("aliyun_git")
     data = aliyun_git.download(url, max_show_bytes_size=0)
     return base64.b64encode(bytes(data)).decode("ascii")
@@ -375,7 +425,12 @@ def download_remote_to_file(url, name, config=None):
 def parse_json_result(response):
     if not response:
         return {"ok": False, "error": "empty RPC response"}
-    value = response.get("r") if isinstance(response, dict) else response
+    if isinstance(response, dict):
+        if "r" not in response:
+            return response
+        value = response["r"]
+    else:
+        value = response
     try:
         return json.loads(value) if isinstance(value, str) else value
     except (TypeError, ValueError) as exc:

@@ -13,6 +13,7 @@ import android.util.Base64
 import android.net.Uri
 import java.io.File
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.activity.ComponentActivity
@@ -246,6 +247,14 @@ private fun ClientMqttScreen() {
         }
     }
 
+    BackHandler(enabled = permissions || targetSettings || settings) {
+        when {
+            permissions -> permissions = false
+            targetSettings -> targetSettings = false
+            settings -> settings = false
+        }
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = !settings && !targetSettings && !permissions,
@@ -419,6 +428,12 @@ private fun FilesPage(initialRoot: String) {
             }
             try {
                 val result = JSONObject(raw)
+                if (!result.optBoolean("ok", true)) {
+                    if (start == 0) entries = emptyList()
+                    hasMore = false
+                    status = result.optString("error", "Feature action failed")
+                    return@launch
+                }
                 val page = result.optJSONArray("items") ?: org.json.JSONArray()
                 val newEntries = buildList {
                     for (index in 0 until page.length()) {
@@ -560,10 +575,14 @@ private fun WifiPage() {
         Button(onClick = {
             status = "Querying..."
             scope.launch {
-                val raw = withContext(Dispatchers.IO) {
-                    service.callAttr("call_feature", "wifi", "info").toString()
+                try {
+                    val raw = withContext(Dispatchers.IO) {
+                        service.callAttr("call_feature", "wifi", "info").toString()
+                    }
+                    status = runCatching { JSONObject(raw).toString(2) }.getOrDefault(raw)
+                } catch (error: Exception) {
+                    status = "Wi-Fi query failed: ${error.message}"
                 }
-                status = runCatching { JSONObject(raw).toString(2) }.getOrDefault(raw)
             }
         }) { Text("Refresh Wi-Fi") }
         Text(status, style = MaterialTheme.typography.bodyMedium)
@@ -605,7 +624,6 @@ private fun TargetSettingsPage(
     var deviceId by remember(existingDeviceId) { mutableStateOf(existingDeviceId.orEmpty()) }
     var topic by remember(existingDeviceId) { mutableStateOf("") }
     var remoteRoot by remember(existingDeviceId) { mutableStateOf("/data/data") }
-    var aliyunJson by remember(existingDeviceId) { mutableStateOf("{}") }
     var privateKey by remember(existingDeviceId) { mutableStateOf("") }
     var timeout by remember(existingDeviceId) { mutableStateOf("10") }
     var allowNoServerKey by remember(existingDeviceId) { mutableStateOf(true) }
@@ -625,13 +643,6 @@ private fun TargetSettingsPage(
                 if (System.currentTimeMillis() - lastLocalEdit >= 1_200L) {
                     topic = config.optString("request_topic", "")
                     remoteRoot = config.optString("remote_root", "/data/data")
-                    aliyunJson = if (config.has("aliyun_json_draft")) {
-                        config.optString("aliyun_json_draft")
-                    } else {
-                        val incomingAliyun = config.optJSONObject("aliyun") ?: JSONObject()
-                        val currentAliyun = runCatching { JSONObject(aliyunJson).toString() }.getOrNull()
-                        if (currentAliyun == incomingAliyun.toString()) aliyunJson else incomingAliyun.toString(2)
-                    }
                     privateKey = config.optString("private_key", "")
                     timeout = config.optString("timeout_draft", config.optString("timeout", "10"))
                     allowNoServerKey = config.optBoolean("allow_no_server_pubkey_response", true)
@@ -642,18 +653,15 @@ private fun TargetSettingsPage(
         }
     }
 
-    LaunchedEffect(deviceId, topic, remoteRoot, aliyunJson, privateKey, timeout, allowNoServerKey, loaded) {
+    LaunchedEffect(deviceId, topic, remoteRoot, privateKey, timeout, allowNoServerKey, loaded) {
         if (!loaded || topic.isBlank()) return@LaunchedEffect
         delay(300)
-        val parsedAliyun = runCatching { JSONObject(aliyunJson) }.getOrNull()
         val timeoutValue = timeout.toDoubleOrNull()?.takeIf { it > 0 }
         val values = JSONObject()
             .put("request_topic", topic.trim())
             .put("remote_root", remoteRoot)
             .put("private_key", privateKey)
             .put("allow_no_server_pubkey_response", allowNoServerKey)
-        if (parsedAliyun != null) values.put("aliyun", parsedAliyun)
-        else values.put("aliyun_json_draft", aliyunJson)
         if (timeoutValue != null) values.put("timeout", timeoutValue)
         else values.put("timeout_draft", timeout)
 
@@ -668,7 +676,6 @@ private fun TargetSettingsPage(
                 onTargetCreated(savedId)
             }
             status = when {
-                parsedAliyun == null -> "Saved; Aliyun JSON is incomplete"
                 timeoutValue == null -> "Saved; timeout must be positive"
                 else -> "Saved to client_mqtt.json"
             }
@@ -696,13 +703,6 @@ private fun TargetSettingsPage(
             Modifier.fillMaxWidth(),
             singleLine = true,
             label = { Text("Allowed remote root") }
-        )
-        OutlinedTextField(
-            aliyunJson,
-            { aliyunJson = it; lastLocalEdit = System.currentTimeMillis() },
-            Modifier.fillMaxWidth(),
-            minLines = 6,
-            label = { Text("Aliyun configuration JSON") }
         )
         OutlinedTextField(
             privateKey,
@@ -744,6 +744,10 @@ private fun SettingsPage(
         mutableStateOf(context.getSharedPreferences("client_mqtt", Context.MODE_PRIVATE).getBoolean("use_external_scripts", false))
     }
     var status by remember { mutableStateOf("") }
+    var aliyunJson by remember { mutableStateOf("{}") }
+    var aliyunLoaded by remember { mutableStateOf(false) }
+    var aliyunLastEdit by remember { mutableStateOf(0L) }
+    var aliyunStatus by remember { mutableStateOf("") }
     var downloadStatus by remember { mutableStateOf("") }
     var downloadLogs by remember { mutableStateOf(listOf<String>()) }
     var downloading by remember { mutableStateOf(false) }
@@ -773,6 +777,46 @@ private fun SettingsPage(
         }
     }
 
+    LaunchedEffect(Unit) {
+        while (true) {
+            runCatching {
+                val config = withContext(Dispatchers.IO) {
+                    JSONObject(service.callAttr("aliyun_settings").toString())
+                }
+                if (System.currentTimeMillis() - aliyunLastEdit >= 1_200L) {
+                    aliyunJson = if (config.has("aliyun_json_draft")) {
+                        config.optString("aliyun_json_draft")
+                    } else {
+                        val incoming = config.optJSONObject("aliyun") ?: JSONObject()
+                        val current = runCatching { JSONObject(aliyunJson).toString() }.getOrNull()
+                        if (current == incoming.toString()) aliyunJson else incoming.toString(2)
+                    }
+                    aliyunLoaded = true
+                }
+            }.onFailure { aliyunStatus = "Unable to sync shared Aliyun settings: ${it.message}" }
+            delay(1_000)
+        }
+    }
+
+    LaunchedEffect(aliyunJson, aliyunLoaded) {
+        if (!aliyunLoaded) return@LaunchedEffect
+        delay(300)
+        val parsed = runCatching { JSONObject(aliyunJson) }.getOrNull()
+        val values = JSONObject()
+        if (parsed == null) values.put("aliyun_json_draft", aliyunJson)
+        else values.put("aliyun", parsed)
+        runCatching {
+            withContext(Dispatchers.IO) {
+                service.callAttr("update_aliyun_settings", values.toString())
+            }
+            aliyunStatus = if (parsed == null) {
+                "Saved draft; invalid JSON keeps the last valid settings active"
+            } else {
+                "Shared Aliyun settings saved"
+            }
+        }.onFailure { aliyunStatus = "Aliyun settings save failed: ${it.message}" }
+    }
+
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -793,6 +837,16 @@ private fun SettingsPage(
                 status = "Restart the app to apply script directory"
             })
         }
+        HorizontalDivider()
+        Text("Shared Aliyun configuration", style = MaterialTheme.typography.titleMedium)
+        OutlinedTextField(
+            aliyunJson,
+            { aliyunJson = it; aliyunLastEdit = System.currentTimeMillis() },
+            Modifier.fillMaxWidth(),
+            minLines = 6,
+            label = { Text("Aliyun configuration JSON") }
+        )
+        Text(aliyunStatus, style = MaterialTheme.typography.bodySmall)
         if (useExternal && externalAllowed) {
             HorizontalDivider()
             Text("External feature scripts", style = MaterialTheme.typography.titleMedium)
